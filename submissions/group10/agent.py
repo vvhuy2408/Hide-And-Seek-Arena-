@@ -92,36 +92,42 @@ class PacmanAgent(BasePacmanAgent):
             Move or (Move, steps): Direction to move (optionally with step count)
         """
         # TODO: Implement your search algorithm here
+        queue = deque([my_position])
+        visited = {my_position}
         
-        # Example: Simple greedy approach (replace with your algorithm)
-        row_diff = enemy_position[0] - my_position[0]
-        col_diff = enemy_position[1] - my_position[1]
-        
-        # Try to move towards ghost
-        if abs(row_diff) > abs(col_diff):
-            primary_move = Move.DOWN if row_diff > 0 else Move.UP
-            desired_steps = abs(row_diff)
-        else:
-            primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
-            desired_steps = abs(col_diff)
+        farthest_pos = my_position
+        max_dist = self._manhattan_distance(my_position, enemy_position)
 
-        action = self._choose_action(
+        # BFS explore map
+        while queue:
+            pos = queue.popleft()
+
+            dist = self._manhattan_distance(pos, enemy_position)
+            if dist > max_dist:
+                max_dist = dist
+                farthest_pos = pos
+
+            for next_pos, move in self._get_neighbors(pos, map_state):
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    queue.append(next_pos)
+
+        # find path to farthest position
+        path = self.bfs(my_position, farthest_pos, map_state)
+
+        if not path or path[0] == Move.STAY:
+            return (Move.STAY, 1)
+
+        first_move = path[0]
+
+        steps = self._max_valid_steps(
             my_position,
-            [primary_move],
+            first_move,
             map_state,
-            desired_steps
+            self.pacman_speed
         )
-        if action:
-            return action
 
-        # If the primary direction is blocked, try other moves
-        fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
-        if action:
-            return action
-        
-        return (Move.STAY, 1)
-    
+        return (first_move, steps)
     # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
