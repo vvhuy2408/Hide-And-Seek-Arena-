@@ -19,6 +19,7 @@ IMPORTANT:
 
 import sys
 from pathlib import Path
+from collections import deque
 
 # Add src to path to import the interface
 src_path = Path(__file__).parent.parent.parent / "src"
@@ -39,14 +40,40 @@ class PacmanAgent(BasePacmanAgent):
     """
     
     def __init__(self, **kwargs):
-    super().__init__(**kwargs)
-    self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-    # TODO: Initialize any data structures you need
-    # Examples:
-    # - self.path = []  # Store planned path
-    # - self.visited = set()  # Track visited positions
-    # - self.name = "Your Agent Name"
-    self.name = "Template Pacman"
+        super().__init__(**kwargs)
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
+        self.name = "BFS Pacman"
+
+    def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
+        """Return the Manhattan distance between two positions."""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+    
+    def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
+        """
+        Find the shortest path from start to goal using BFS.
+ 
+        Returns:
+            List of Move enums from start to goal,
+            or [Move.STAY] if no path exists.
+        """
+        # Each entry: (current_position, path_taken_so_far)
+        queue = deque([(start, [])])
+        visited = {start}
+ 
+        while queue:
+            current_pos, path = queue.popleft()
+ 
+            # Reached the goal – return the path
+            if current_pos == goal:
+                return path
+ 
+            for next_pos, move in self._get_neighbors(current_pos, map_state):
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    queue.append((next_pos, path + [move]))
+ 
+        # No path found
+        return [Move.STAY]
     
     def step(self, map_state: np.ndarray, 
              my_position: tuple, 
@@ -95,7 +122,29 @@ class PacmanAgent(BasePacmanAgent):
         
         return (Move.STAY, 1)
     
-    # Helper methods (you can add more)
+    # Helper methods
+    
+    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
+        """Return True if pos is inside the grid and not a wall."""
+        row, col = pos
+        height, width = map_state.shape
+        if row < 0 or row >= height or col < 0 or col >= width:
+            return False
+        return map_state[row, col] == 0
+ 
+    def _apply_move(self, pos: tuple, move: Move) -> tuple:
+        """Return the new position after applying a move."""
+        delta_row, delta_col = move.value
+        return (pos[0] + delta_row, pos[1] + delta_col)
+ 
+    def _get_neighbors(self, pos: tuple, map_state: np.ndarray) -> list:
+        """Return list of (next_pos, move) for all valid moves from pos."""
+        neighbors = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            next_pos = self._apply_move(pos, move)
+            if self._is_valid_position(next_pos, map_state):
+                neighbors.append((next_pos, move))
+        return neighbors
     
     def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
         for move in moves:
@@ -120,16 +169,6 @@ class PacmanAgent(BasePacmanAgent):
     def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
         """Check if a move from pos is valid for at least one step."""
         return self._max_valid_steps(pos, move, map_state, 1) == 1
-    
-    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
-        row, col = pos
-        height, width = map_state.shape
-        
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        
-        return map_state[row, col] == 0
 
 
 class GhostAgent(BaseGhostAgent):
@@ -142,8 +181,11 @@ class GhostAgent(BaseGhostAgent):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # TODO: Initialize any data structures you need
-        pass
+        self.name = "Evasive Ghost"
+    
+    def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
+        """Return the Manhattan distance between two positions."""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
     def step(self, map_state: np.ndarray, 
              my_position: tuple, 
@@ -184,7 +226,28 @@ class GhostAgent(BaseGhostAgent):
         
         return Move.STAY
     
-    # Helper methods (you can add more)
+    # Helper methods
+    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
+        """Return True if pos is inside the grid and not a wall."""
+        row, col = pos
+        height, width = map_state.shape
+        if row < 0 or row >= height or col < 0 or col >= width:
+            return False
+        return map_state[row, col] == 0
+ 
+    def _apply_move(self, pos: tuple, move: Move) -> tuple:
+        """Return the new position after applying a move."""
+        delta_row, delta_col = move.value
+        return (pos[0] + delta_row, pos[1] + delta_col)
+ 
+    def _get_neighbors(self, pos: tuple, map_state: np.ndarray) -> list:
+        """Return list of (next_pos, move) for all valid moves from pos."""
+        neighbors = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            next_pos = self._apply_move(pos, move)
+            if self._is_valid_position(next_pos, map_state):
+                neighbors.append((next_pos, move))
+        return neighbors
     
     def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
         """Check if a move from pos is valid."""
@@ -192,12 +255,3 @@ class GhostAgent(BaseGhostAgent):
         new_pos = (pos[0] + delta_row, pos[1] + delta_col)
         return self._is_valid_position(new_pos, map_state)
     
-    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
-        row, col = pos
-        height, width = map_state.shape
-        
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        
-        return map_state[row, col] == 0
