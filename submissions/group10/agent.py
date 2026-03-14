@@ -92,42 +92,36 @@ class PacmanAgent(BasePacmanAgent):
             Move or (Move, steps): Direction to move (optionally with step count)
         """
         # TODO: Implement your search algorithm here
-        queue = deque([my_position])
-        visited = {my_position}
         
-        farthest_pos = my_position
-        max_dist = self._manhattan_distance(my_position, enemy_position)
+        # Example: Simple greedy approach (replace with your algorithm)
+        row_diff = enemy_position[0] - my_position[0]
+        col_diff = enemy_position[1] - my_position[1]
+        
+        # Try to move towards ghost
+        if abs(row_diff) > abs(col_diff):
+            primary_move = Move.DOWN if row_diff > 0 else Move.UP
+            desired_steps = abs(row_diff)
+        else:
+            primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
+            desired_steps = abs(col_diff)
 
-        # BFS explore map
-        while queue:
-            pos = queue.popleft()
-
-            dist = self._manhattan_distance(pos, enemy_position)
-            if dist > max_dist:
-                max_dist = dist
-                farthest_pos = pos
-
-            for next_pos, move in self._get_neighbors(pos, map_state):
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    queue.append(next_pos)
-
-        # find path to farthest position
-        path = self.bfs(my_position, farthest_pos, map_state)
-
-        if not path or path[0] == Move.STAY:
-            return (Move.STAY, 1)
-
-        first_move = path[0]
-
-        steps = self._max_valid_steps(
+        action = self._choose_action(
             my_position,
-            first_move,
+            [primary_move],
             map_state,
-            self.pacman_speed
+            desired_steps
         )
+        if action:
+            return action
 
-        return (first_move, steps)
+        # If the primary direction is blocked, try other moves
+        fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+        action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
+        if action:
+            return action
+        
+        return (Move.STAY, 1)
+    
     # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
@@ -193,44 +187,35 @@ class GhostAgent(BaseGhostAgent):
         """Return the Manhattan distance between two positions."""
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
-    def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
-             enemy_position: tuple,
-             step_number: int) -> Move:
-        """
-        Decide the next move.
-        
-        Args:
-            map_state: 2D numpy array where 1=wall, 0=empty
-            my_position: Your current (row, col)
-            enemy_position: Pacman's current (row, col)
-            step_number: Current step number (starts at 1)
-            
-        Returns:
-            Move: One of Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY
-        """
-        # TODO: Implement your search algorithm here
-        
-        # Example: Simple evasive approach (replace with your algorithm)
-        row_diff = my_position[0] - enemy_position[0]
-        col_diff = my_position[1] - enemy_position[1]
-        
-        # Try to move away from Pacman
-        if abs(row_diff) > abs(col_diff):
-            move = Move.DOWN if row_diff > 0 else Move.UP
-        else:
-            move = Move.RIGHT if col_diff > 0 else Move.LEFT
-        
-        # Check if move is valid
-        if self._is_valid_move(my_position, move, map_state):
-            return move
-        
-        # If not valid, try other moves
-        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-            if self._is_valid_move(my_position, move, map_state):
-                return move
-        
-        return Move.STAY
+    def step(self, map_state, my_position, enemy_position, step_number):
+
+        queue = deque([my_position])
+        visited = {my_position}
+
+        farthest_pos = my_position
+        max_dist = self._manhattan_distance(my_position, enemy_position)
+
+        # BFS explore map
+        while queue:
+            pos = queue.popleft()
+
+            dist = self._manhattan_distance(pos, enemy_position)
+            if dist > max_dist:
+                max_dist = dist
+                farthest_pos = pos
+
+            for next_pos, move in self._get_neighbors(pos, map_state):
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    queue.append(next_pos)
+
+        # BFS path to farthest position
+        path = self.bfs(my_position, farthest_pos, map_state)
+
+        if not path or path[0] == Move.STAY:
+            return Move.STAY
+
+        return path[0]
     
     # Helper methods
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
