@@ -93,35 +93,35 @@ class PacmanAgent(BasePacmanAgent):
         """
         # TODO: Implement your search algorithm here
         
-        # Example: Simple greedy approach (replace with your algorithm)
-        row_diff = enemy_position[0] - my_position[0]
-        col_diff = enemy_position[1] - my_position[1]
-        
-        # Try to move towards ghost
-        if abs(row_diff) > abs(col_diff):
-            primary_move = Move.DOWN if row_diff > 0 else Move.UP
-            desired_steps = abs(row_diff)
-        else:
-            primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
-            desired_steps = abs(col_diff)
+        # use BFS to catch the ghost by calculate the shortest path
+        # returns a list of move (up, down, left, right)
+        path = self.bfs(my_position, enemy_position, map_state)
 
-        action = self._choose_action(
-            my_position,
-            [primary_move],
-            map_state,
-            desired_steps
-        )
-        if action:
-            return action
+        # handle edge case 1: no path found of at goal
+        if not path or path == [Move.STAY]:
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]: 
+                if self._is_valid_move(my_position, move, map_state):
+                    return (move, 1)
+            return (Move.STAY, 1)
+            
+        # get the first and second move from the path
+        first_move = path[0]
 
-        # If the primary direction is blocked, try other moves
-        fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
-        if action:
-            return action
+        # handle edge case 2: ghost is next to pacman 
+        if len(path) == 1:
+            return (first_move, 1)
+
+        # get the second move to check for straight line movement
+        second_move = path[1]
+
+        # if pacman move in a straight line, he can move 2 steps
+        if first_move == second_move and self.pacman_speed >= 2:
+            actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+            return (first_move, actual_steps)
         
-        return (Move.STAY, 1)
-    
+        # default to 1 step if turning of if only 1 step is valid
+        return (first_move, 1)
+ 
     # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
