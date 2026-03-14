@@ -49,30 +49,21 @@ class PacmanAgent(BasePacmanAgent):
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
     def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
-        """
-        Find the shortest path from start to goal using BFS.
- 
-        Returns:
-            List of Move enums from start to goal,
-            or [Move.STAY] if no path exists.
-        """
-        # Each entry: (current_position, path_taken_so_far)
         queue = deque([(start, [])])
         visited = {start}
- 
+
         while queue:
             current_pos, path = queue.popleft()
- 
+
             # Reached the goal – return the path
             if current_pos == goal:
                 return path
- 
+
             for next_pos, move in self._get_neighbors(current_pos, map_state):
                 if next_pos not in visited:
                     visited.add(next_pos)
                     queue.append((next_pos, path + [move]))
- 
-        # No path found
+
         return [Move.STAY]
     
     def step(self, map_state: np.ndarray, 
@@ -182,6 +173,33 @@ class GhostAgent(BaseGhostAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.name = "Evasive Ghost"
+        
+    def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
+        """
+        Find the shortest path from start to goal using BFS.
+ 
+        Returns:
+            List of Move enums from start to goal,
+            or [Move.STAY] if no path exists.
+        """
+        # Each entry: (current_position, path_taken_so_far)
+        queue = deque([(start, [])])
+        visited = {start}
+ 
+        while queue:
+            current_pos, path = queue.popleft()
+ 
+            # Reached the goal – return the path
+            if current_pos == goal:
+                return path
+ 
+            for next_pos, move in self._get_neighbors(current_pos, map_state):
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    queue.append((next_pos, path + [move]))
+ 
+        # No path found
+        return [Move.STAY]
     
     def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
         """Return the Manhattan distance between two positions."""
@@ -189,27 +207,27 @@ class GhostAgent(BaseGhostAgent):
     
     def step(self, map_state, my_position, enemy_position, step_number):
 
-        queue = deque([my_position])
-        visited = {my_position}
+        # BFS từ Pacman để tính khoảng cách thực tế đến mọi ô
+        queue = deque([(enemy_position, 0)])
+        visited = {enemy_position: 0}
 
-        farthest_pos = my_position
-        max_dist = self._manhattan_distance(my_position, enemy_position)
-
-        # BFS explore map
         while queue:
-            pos = queue.popleft()
+            pos, dist = queue.popleft()
+            for next_pos, _ in self._get_neighbors(pos, map_state):
+                if next_pos not in visited:
+                    visited[next_pos] = dist + 1
+                    queue.append((next_pos, dist + 1))
 
-            dist = self._manhattan_distance(pos, enemy_position)
+        # Tìm ô xa nhất mà Ghost có thể đến được
+        farthest_pos = my_position
+        max_dist = visited.get(my_position, 0)
+
+        for pos, dist in visited.items():
             if dist > max_dist:
                 max_dist = dist
                 farthest_pos = pos
 
-            for next_pos, move in self._get_neighbors(pos, map_state):
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    queue.append(next_pos)
-
-        # BFS path to farthest position
+        # BFS path từ Ghost đến ô đó
         path = self.bfs(my_position, farthest_pos, map_state)
 
         if not path or path[0] == Move.STAY:
