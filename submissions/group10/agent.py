@@ -207,7 +207,7 @@ class GhostAgent(BaseGhostAgent):
     
     def step(self, map_state, my_position, enemy_position, step_number):
 
-        # BFS từ Pacman để tính khoảng cách thực tế đến mọi ô
+        # BFS of Pacman to calculate its distance to other positions
         queue = deque([(enemy_position, 0)])
         visited = {enemy_position: 0}
 
@@ -218,7 +218,7 @@ class GhostAgent(BaseGhostAgent):
                     visited[next_pos] = dist + 1
                     queue.append((next_pos, dist + 1))
 
-        # Tìm ô xa nhất mà Ghost có thể đến được
+        # Finding farthest position that Ghost can reach 
         farthest_pos = my_position
         max_dist = visited.get(my_position, 0)
 
@@ -227,7 +227,7 @@ class GhostAgent(BaseGhostAgent):
                 max_dist = dist
                 farthest_pos = pos
 
-        # BFS path từ Ghost đến ô đó
+        # BFS path fron Ghost to that position
         path = self.bfs(my_position, farthest_pos, map_state)
 
         if not path or path[0] == Move.STAY:
