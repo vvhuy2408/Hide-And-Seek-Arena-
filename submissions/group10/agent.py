@@ -84,33 +84,39 @@ class PacmanAgent(BasePacmanAgent):
         """
         # TODO: Implement your search algorithm here
         
+        if not hasattr(self, 'current_path'):
+            self.current_path = []
+        if not hasattr(self, 'last_enemy_pos'):
+            self.last_enemy_pos = None
+        
+        # LOGIC REPLANNING
         # use BFS to catch the ghost by calculate the shortest path
-        # returns a list of move (up, down, left, right)
-        path = self.bfs(my_position, enemy_position, map_state)
+        if not self.current_path or enemy_position != self.last_enemy_pos:
+            # returns a list of move (up, down, left, right)
+            self.current_path = self.bfs(my_position, enemy_position, map_state)
+            self.last_enemy_pos = enemy_position
 
-        # handle edge case 1: no path found of at goal
-        if not path or path == [Move.STAY]:
+        # HANDLE EDGE CASE: NO PATH CASE - fallback move
+        if not self.current_path or self.current_path == [Move.STAY]:
+            self.current_path = [] 
             for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]: 
                 if self._is_valid_move(my_position, move, map_state):
                     return (move, 1)
             return (Move.STAY, 1)
             
         # get the first and second move from the path
-        first_move = path[0]
+        first_move = self.current_path.pop(0)
 
-        # handle edge case 2: ghost is next to pacman 
-        if len(path) == 1:
-            return (first_move, 1)
-
-        # get the second move to check for straight line movement
-        second_move = path[1]
-
+        # HANDLE EDGE CASE: OPTIMIZED SPEED 
         # if pacman move in a straight line, he can move 2 steps
-        if first_move == second_move and self.pacman_speed >= 2:
-            actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
-            return (first_move, actual_steps)
-        
-        # default to 1 step if turning of if only 1 step is valid
+        if self.current_path and self.pacman_speed >= 2:
+            second_move = self.current_path[0]       
+            if first_move == second_move:
+                actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+                if actual_steps == 2:
+                    self.current_path.pop(0)
+                    return (first_move, 2)
+        # default to 1 step if turning of if only 1 step is valid      
         return (first_move, 1)
  
     # Helper methods
