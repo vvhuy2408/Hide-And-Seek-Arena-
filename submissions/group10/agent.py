@@ -188,34 +188,82 @@ class GhostAgent(BaseGhostAgent):
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
     def step(self, map_state, my_position, enemy_position, step_number):
+            # 1. BFS TỪ PACMAN: Tính số ô thực tế từ Pacman tới mọi vị trí
+            pacman_queue = deque([(enemy_position, 0)])
+            pacman_distances = {enemy_position: 0}
 
-        queue = deque([my_position])
-        visited = {my_position}
+            while pacman_queue:
+                pos, dist = pacman_queue.popleft()
+                for next_pos, _ in self._get_neighbors(pos, map_state):
+                    if next_pos not in pacman_distances:
+                        pacman_distances[next_pos] = dist + 1
+                        pacman_queue.append((next_pos, dist + 1))
 
-        farthest_pos = my_position
-        max_dist = self._manhattan_distance(my_position, enemy_position)
+            # 2. BFS TỪ GHOST: Tìm vùng an toàn có tính đến TỐC ĐỘ X2 CỦA PACMAN
+            ghost_queue = deque([my_position])
+            ghost_distances = {my_position: 0}
+            parent = {} 
+            
+            best_target = my_position
+            max_dist_to_pacman = pacman_distances.get(my_position, 0)
 
-        # BFS explore map
-        while queue:
-            pos = queue.popleft()
+            while ghost_queue:
+                curr = ghost_queue.popleft()
+                ghost_d = ghost_distances[curr]
+                
+                # Đánh giá mục tiêu: Chọn ô nằm xa Pacman nhất
+                curr_pacman_d = pacman_distances.get(curr, 0)
+                if curr_pacman_d > max_dist_to_pacman:
+                    max_dist_to_pacman = curr_pacman_d
+                    best_target = curr
+                
+                for next_pos, move in self._get_neighbors(curr, map_state):
+                    if next_pos not in ghost_distances:
+                        next_ghost_d = ghost_d + 1
+                        next_pacman_d = pacman_distances.get(next_pos, 0)
+                        
+                        # ĐIỀU KIỆN SỐNG CÒN TỐI THƯỢNG:
+                        # Pacman có thể đi 2 ô/bước trên đường thẳng. 
+                        # Ghost phải tới được ô đó trước cả khi Pacman dùng tốc độ tối đa.
+                        pacman_min_time_to_reach = next_pacman_d / 2.0 
+                        
+                        if next_ghost_d < pacman_min_time_to_reach: 
+                            ghost_distances[next_pos] = next_ghost_d
+                            parent[next_pos] = (curr, move)
+                            ghost_queue.append(next_pos)
 
-            dist = self._manhattan_distance(pos, enemy_position)
-            if dist > max_dist:
-                max_dist = dist
-                farthest_pos = pos
+            # 3. RA QUYẾT ĐỊNH & FALLBACK (NÉ NGÕ CỤT)
+            best_move = Move.STAY
+            
+            if best_target != my_position:
+                # Nếu có đường tẩu thoát an toàn, truy xuất bước đi đầu tiên
+                path = self._reconstruct_path(parent, my_position, best_target)
+                if path:
+                    best_move = path[0]
+            else:
+                # TRƯỜNG HỢP BỊ KẸT: Logic sinh tồn thông minh
+                best_fallback_score = -float('inf')
+                
+                for next_pos, move in self._get_neighbors(my_position, map_state):
+                    # Khoảng cách từ ô này đến Pacman
+                    p_dist = pacman_distances.get(next_pos, 0)
+                    score = p_dist
+                    
+                    # Kiểm tra ngõ cụt: Đếm số đường đi khả thi từ ô next_pos này
+                    free_neighbors = len(self._get_neighbors(next_pos, map_state))
+                    
+                    # Nếu ô này là ngõ cụt (chỉ có 1 đường lùi lại), trừ điểm nặng
+                    # Để Ghost ưu tiên chạy ra chỗ thoáng rộng hơn
+                    if free_neighbors <= 1:
+                        score -= 100 
 
-            for next_pos, move in self._get_neighbors(pos, map_state):
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    queue.append(next_pos)
+                    if score > best_fallback_score:
+                        best_fallback_score = score
+                        best_move = move
 
-        # BFS path to farthest position
-        path = self.bfs(my_position, farthest_pos, map_state)
-
-        if not path or path[0] == Move.STAY:
-            return Move.STAY
-
-        return path[0]
+            print(f"[Ghost] Step {step_number} | Mode: {'Escape' if best_target != my_position else 'Survival'} | Target Dist: {max_dist_to_pacman}")
+            
+            return best_move
     
     # Helper methods
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
