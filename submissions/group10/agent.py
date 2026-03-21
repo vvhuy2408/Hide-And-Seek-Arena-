@@ -44,11 +44,13 @@ class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
+
+        # path catching
+        self.current_path = []
+        self.last_enemy_pos = None
         self.name = "BFS Pacman"
         
-        """ # path catching
-        self.current_path = []
-        self.last_target_pos = None """
+        
 
     def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
         """Return the Manhattan distance between two positions."""
@@ -79,81 +81,73 @@ class PacmanAgent(BasePacmanAgent):
         return [Move.STAY]
     
     def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
-             enemy_position: tuple,
-             step_number: int):
+         my_position: tuple, 
+         enemy_position: tuple,
+         step_number: int):
         """
-        Decide the next move.
+        Decide the next move for Pacman (Seeker).
+        
+        Strategy:
+            - Use BFS to find shortest path to Ghost
+            - Replan every step vì Ghost luôn di chuyển
+            - Move 2 steps if going straight, 1 step if turning
         
         Args:
             map_state: 2D numpy array where 1=wall, 0=empty
-            my_position: Your current (row, col)
+            my_position: Pacman's current (row, col)
             enemy_position: Ghost's current (row, col)
             step_number: Current step number (starts at 1)
             
         Returns:
-            Move or (Move, steps): Direction to move (optionally with step count)
-        """
-        # TODO: Implement your search algorithm here
-        
-        # use BFS to catch the ghost by calculate the shortest path
-        # returns a list of move (up, down, left, right)
-        
-        # performance benchmark: 
-        """ NOTE: Change from return in every step -> return one final result
-                to easier for calculating time
+            (Move, steps): Direction and number of steps to move
         """
         start_time = time.perf_counter()
-        bfs_time = 0 
-        
-        # ------- starting code -------
-        # to catch the ghost when pacman stand beside
-        if self._manhattan_distance(my_position, enemy_position) <= 1:
-            result = (Move.STAY, 1)
-        
-        else: 
+        bfs_time = 0
+
+        # ------- REPLANNING -------
+        # Replan mỗi bước vì Ghost luôn di chuyển → path cũ luôn lỗi thời
+        if not self.current_path or enemy_position != self.last_enemy_pos:
             bfs_start = time.perf_counter()
-            path = self.bfs(my_position, enemy_position, map_state)
+            self.current_path = self.bfs(my_position, enemy_position, map_state)
             bfs_time = time.perf_counter() - bfs_start
-            
-            # handle edge case 1: no path found of at goal
-            if not path or path == [Move.STAY]:
-                for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]: 
-                    if self._is_valid_move(my_position, move, map_state):
-                        result = (move, 1)
-                        break
-                else: 
-                    result = (Move.STAY, 1)
-            
-            else: 
-                # get the first and second move from the path
-                first_move = path[0]
+            self.last_enemy_pos = enemy_position
 
-                # handle edge case 2: ghost is next to pacman 
-                if len(path) == 1:
-                    result = (first_move, 1)
+        # ------- EDGE CASE: NO PATH -------
+        # Xảy ra khi Ghost bị cô lập hoàn toàn bởi wall
+        # → đứng yên chờ hết max_steps, Ghost tự thắng
+        if not self.current_path or self.current_path == [Move.STAY]:
+            self.current_path = []
+            result = (Move.STAY, 1)
 
-                # get the second move to check for straight line movement
-                if len(path) >= 2:
-                    second_move = path[1]
+        else:
+            # ------- MULTI-STEP LOGIC -------
+            # Rule: đi thẳng (same direction) → 2 bước
+            #       quẹo (different direction) → 1 bước
+            first_move = self.current_path.pop(0)
+
+            if self.current_path and self.pacman_speed >= 2:
+                second_move = self.current_path[0]  # nhìn trước move tiếp theo
+                if first_move == second_move:
+                    # Đi thẳng → thử đi 2 bước
+                    actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+                    if actual_steps == 2:
+                        self.current_path.pop(0)  # consume thêm 1 move vì đã đi 2 bước
+                        result = (first_move, 2)
+                    else:
+                        # Wall chặn bước 2 → chỉ đi 1
+                        result = (first_move, 1)
                 else:
-                    second_move = None
-
-                # if pacman move in a straight line, he can move 2 steps
-                if first_move == second_move and self.pacman_speed >= 2:
-                    actual_steps = self._max_valid_steps(my_position, first_move, map_state, self.pacman_speed)
-                    result = (first_move, actual_steps)
-                else: 
+                    # Quẹo → chỉ đi 1 bước
                     result = (first_move, 1)
-                    # default to 1 step if turning of if only 1 step is valid
-        
-        # ----- ending code -----
-        
+            else:
+                # pacman_speed = 1 hoặc path chỉ còn 1 move → đi 1 bước
+                result = (first_move, 1)
+
+        # ------- BENCHMARK -------
         total_time = time.perf_counter() - start_time
         print(f"[Pacman] Step {step_number} | Total: {total_time:.6f}s | BFS: {bfs_time:.6f}s")
-        
+
         return result
- 
     # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
