@@ -49,8 +49,6 @@ class PacmanAgent(BasePacmanAgent):
         self.current_path = []
         self.last_enemy_pos = None
         self.name = "BFS Pacman"
-        
-        
 
     def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
         """Return the Manhattan distance between two positions."""
@@ -80,6 +78,22 @@ class PacmanAgent(BasePacmanAgent):
 
         return [Move.STAY]
     
+    def predict_enemy_move(self, enemy_pos, my_pos, map_state):
+        """Predict enemy's next move (assume they move away from us)."""
+        best_move = Move.STAY
+        best_distance = -1 # Để đảm bảo lấy được ít nhất 1 move hợp lệ
+        
+        # Duyệt các ô Ghost có thể đi tới
+        for next_pos, move in self._get_neighbors(enemy_pos, map_state):
+            # Tính khoảng cách Manhattan từ ô đó tới Pacman
+            distance = self._manhattan_distance(next_pos, my_pos)
+            if distance > best_distance:
+                best_distance = distance
+                best_move = move
+        
+        # Trả về vị trí dự đoán (ô mà Ghost sẽ ở đó để xa Pacman nhất)
+        return self._apply_move(enemy_pos, best_move)
+    
     def step(self, map_state: np.ndarray, 
          my_position: tuple, 
          enemy_position: tuple,
@@ -104,20 +118,47 @@ class PacmanAgent(BasePacmanAgent):
         start_time = time.perf_counter()
         bfs_time = 0
 
+        # ------- GET TARGET -------
+        dist_to_ghost = self._manhattan_distance(my_position, enemy_position)
+        
+        if dist_to_ghost <= self.pacman_speed:
+            # Nếu ghost cách 2 bước --> nhắm thẳng vào ghost
+            target_pos = enemy_position
+        else:
+            # ------- PREDICTIVE -------
+            # Dự đoán vị trí ghost
+            predicted_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
+            # Nhắm vào vị trí đã dự đoán
+            target_pos = predicted_pos
+
         # ------- REPLANNING -------
         # Replan mỗi bước vì Ghost luôn di chuyển → path cũ luôn lỗi thời
         if not self.current_path or enemy_position != self.last_enemy_pos:
             bfs_start = time.perf_counter()
-            self.current_path = self.bfs(my_position, enemy_position, map_state)
+            # Đuổi theo vị trí đã dự đoán
+            self.current_path = self.bfs(my_position, target_pos, map_state)
             bfs_time = time.perf_counter() - bfs_start
             self.last_enemy_pos = enemy_position
+        else:
+            bfs_time = 0
 
-        # ------- EDGE CASE: NO PATH -------
+        # ------- EDGE CASE: NO PATH & DEAD-END AVOIDANCE -------
         # Xảy ra khi Ghost bị cô lập hoàn toàn bởi wall
         # → đứng yên chờ hết max_steps, Ghost tự thắng
         if not self.current_path or self.current_path == [Move.STAY]:
             self.current_path = []
-            result = (Move.STAY, 1)
+            # Chọn hướng có nhiều lối thoát nhất thay vì đứng yên (Move.STAY)
+            best_fallback = Move.STAY
+            max_freedom = -1
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                next_p = self._apply_move(my_position, move)
+                if self._is_valid_position(next_p, map_state):
+                    # Heuristic tránh dead-end
+                    freedom = len(self._get_neighbors(next_p, map_state))
+                    if freedom > max_freedom:
+                        max_freedom = freedom
+                        best_fallback = move
+            result = (best_fallback, 1)
 
         else:
             # ------- MULTI-STEP LOGIC -------
@@ -148,6 +189,8 @@ class PacmanAgent(BasePacmanAgent):
         print(f"[Pacman] Step {step_number} | Total: {total_time:.6f}s | BFS: {bfs_time:.6f}s")
 
         return result
+    
+    
     # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
