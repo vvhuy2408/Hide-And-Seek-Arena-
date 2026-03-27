@@ -48,12 +48,22 @@ class PacmanAgent(BasePacmanAgent):
         # path catching
         self.current_path = []
         self.last_enemy_pos = None
+        self.dist_map = {}
         self.name = "BFS Pacman"
 
-    def _manhattan_distance(self, pos1: tuple, pos2: tuple) -> int:
-        """Return the Manhattan distance between two positions."""
-        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
-    
+    def _bfs_distance_map(self, start, map_state):
+        queue = deque([(start, 0)])
+        dist = {start: 0}
+
+        while queue:
+            pos, d = queue.popleft()
+            for nxt, _ in self._get_neighbors(pos, map_state):
+                if nxt not in dist:
+                    dist[nxt] = d + 1
+                    queue.append((nxt, d + 1))
+        
+        return dist
+
     def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
         if start == goal:
             return []
@@ -66,29 +76,47 @@ class PacmanAgent(BasePacmanAgent):
         while queue:
             current = queue.popleft()
             
-            for next_pos, move in self._get_neighbors(current, map_state):
+            # Lấy danh sách hàng xóm
+            neighbors = self._get_neighbors(current, map_state)
+
+            # --- TIE-BREAKING LOGIC: Ưu tiên hướng không đổi ---
+            if current in parent:
+                _, prev_move = parent[current]
+                # Đưa hướng trùng với hướng trước đó lên đầu danh sách duyệt
+                neighbors.sort(key=lambda x: x[1] != prev_move)
+
+            for next_pos, move in neighbors:
                 if next_pos not in visited:
                     visited.add(next_pos)
                     parent[next_pos] = (current, move)
                     # early stop
                     if next_pos == goal:
                         return self._reconstruct_path(parent, start, goal)
-                    
                     queue.append(next_pos)
 
-        return [Move.STAY]
+        return []
     
     def predict_enemy_move(self, enemy_pos, my_pos, map_state):
         """Predict enemy's next move (assume they move away from us)."""
         best_move = Move.STAY
         best_distance = -1 # Để đảm bảo lấy được ít nhất 1 move hợp lệ
         
+        # Danh sách các nước đi có thể của Ghost
+        possible_moves = self._get_neighbors(enemy_pos, map_state)
+
         # Duyệt các ô Ghost có thể đi tới
-        for next_pos, move in self._get_neighbors(enemy_pos, map_state):
+        for next_pos, move in possible_moves:
             # Tính khoảng cách Manhattan từ ô đó tới Pacman
-            distance = self._manhattan_distance(next_pos, my_pos)
-            if distance > best_distance:
-                best_distance = distance
+            distance = self.dist_map.get(next_pos, 0)
+
+            # TIE-BREAKING: Thêm một chút noise dựa trên tọa độ 
+            # để không bao giờ có 2 ô bằng điểm tuyệt đối
+            # --> tránh trường hợp pacman nhảy qa nhảy lại 
+            tie_breaker = (next_pos[0] * 0.01) + (next_pos[1] * 0.001)
+            current_score = distance + tie_breaker
+            
+            if current_score > best_distance:
+                best_distance = current_score
                 best_move = move
         
         # Trả về vị trí dự đoán (ô mà Ghost sẽ ở đó để xa Pacman nhất)
@@ -118,27 +146,47 @@ class PacmanAgent(BasePacmanAgent):
         start_time = time.perf_counter()
         bfs_time = 0
 
+        # ------- DISTANCE MAP -------
+        self.dist_map = self._bfs_distance_map(my_position, map_state)
+
         # ------- GET TARGET -------
-        dist_to_ghost = self._manhattan_distance(my_position, enemy_position)
+        dist_to_ghost = self.dist_map.get(enemy_position, float('inf'))
         
+        # ------- THE FINAL STRIKE -------
+        if dist_to_ghost == 1:
+            # Dự đoán ô tiếp theo Ghost sẽ tới (ô mà Ghost nghĩ là an toàn nhất)
+            target_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
+            
+            # Tìm đường đến ô dự đoán đó
+            path_to_target = self.bfs(my_position, target_pos, map_state)
+
+            if path_to_target:
+                move = path_to_target[0]
+                # Kiểm tra xem có thể nhảy 2 bước đến đó không (không vướng tường)
+                actual_steps = self._max_valid_steps(my_position, move, map_state, 2)
+                
+                # Nếu nhảy 2 bước tới đúng Target
+                if actual_steps >= 1:
+                    return (move, actual_steps)
+                
+            # Fallback: Nếu không nhảy 2 bước được, bước thẳng vào ô hiện tại của Ghost
+            path_direct = self.bfs(my_position, enemy_position, map_state)
+            if path_direct:
+                return (path_direct[0], 1)
+            
+        # Nếu ghost cách 2 bước --> nhắm thẳng vào ghost
         if dist_to_ghost <= self.pacman_speed:
-            # Nếu ghost cách 2 bước --> nhắm thẳng vào ghost
             target_pos = enemy_position
         else:
             # ------- PREDICTIVE -------
-            # Dự đoán vị trí ghost
-            predicted_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
-            # Nhắm vào vị trí đã dự đoán
-            target_pos = predicted_pos
+            # Dự đoán vị trí ghost, nhắm vào vị trí đã dự đoán
+            target_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
 
         # ------- REPLANNING -------
         # Replan mỗi bước vì Ghost luôn di chuyển → path cũ luôn lỗi thời
-        if not self.current_path or enemy_position != self.last_enemy_pos:
-            bfs_start = time.perf_counter()
-            # Đuổi theo vị trí đã dự đoán
+        if not self.current_path or self.last_enemy_pos != enemy_position:
             self.current_path = self.bfs(my_position, target_pos, map_state)
-            bfs_time = time.perf_counter() - bfs_start
-            self.last_enemy_pos = enemy_position
+            self.last_enemy_pos = enemy_position        
         else:
             bfs_time = 0
 
@@ -146,50 +194,53 @@ class PacmanAgent(BasePacmanAgent):
         # Xảy ra khi Ghost bị cô lập hoàn toàn bởi wall
         # → đứng yên chờ hết max_steps, Ghost tự thắng
         if not self.current_path or self.current_path == [Move.STAY]:
-            self.current_path = []
             # Chọn hướng có nhiều lối thoát nhất thay vì đứng yên (Move.STAY)
             best_fallback = Move.STAY
-            max_freedom = -1
+            best_score = -1
+
             for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
                 next_p = self._apply_move(my_position, move)
                 if self._is_valid_position(next_p, map_state):
                     # Heuristic tránh dead-end
                     freedom = len(self._get_neighbors(next_p, map_state))
-                    if freedom > max_freedom:
-                        max_freedom = freedom
+                    ghost_dist = self.dist_map.get(next_p, 0)
+                    score = ghost_dist + 0.5 * freedom
+                    
+                    if score > best_score:
+                        best_score = score
                         best_fallback = move
+
             result = (best_fallback, 1)
 
-        else:
-            # ------- MULTI-STEP LOGIC -------
-            # Rule: đi thẳng (same direction) → 2 bước
-            #       quẹo (different direction) → 1 bước
-            first_move = self.current_path.pop(0)
+        # ------- MULTI-STEP LOGIC -------
+        # Rule: đi thẳng (same direction) → 2 bước
+        #       quẹo (different direction) → 1 bước
+        first_move = self.current_path.pop(0)
+        steps_to_move = 1
 
-            if self.current_path and self.pacman_speed >= 2:
-                second_move = self.current_path[0]  # nhìn trước move tiếp theo
-                if first_move == second_move:
-                    # Đi thẳng → thử đi 2 bước
-                    actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
-                    if actual_steps == 2:
-                        self.current_path.pop(0)  # consume thêm 1 move vì đã đi 2 bước
-                        result = (first_move, 2)
-                    else:
-                        # Wall chặn bước 2 → chỉ đi 1
-                        result = (first_move, 1)
+        if self.current_path and self.pacman_speed >= 2:
+            second_move = self.current_path[0]  # nhìn trước move tiếp theo
+            
+            if second_move == first_move:
+                # Đi thẳng → thử đi 2 bước
+                actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+                if actual_steps == 2:
+                    self.current_path.pop(0)  # consume thêm 1 move vì đã đi 2 bước
+                    steps_to_move = 2
                 else:
-                    # Quẹo → chỉ đi 1 bước
-                    result = (first_move, 1)
+                    # Wall chặn bước 2 → chỉ đi 1
+                    steps_to_move = 1
             else:
-                # pacman_speed = 1 hoặc path chỉ còn 1 move → đi 1 bước
-                result = (first_move, 1)
+                # Quẹo → chỉ đi 1 bước
+                steps_to_move = 1
+                
+        result = (first_move, steps_to_move)
 
         # ------- BENCHMARK -------
         total_time = time.perf_counter() - start_time
         print(f"[Pacman] Step {step_number} | Total: {total_time:.6f}s | BFS: {bfs_time:.6f}s")
 
         return result
-    
     
     # Helper methods
     
@@ -312,178 +363,84 @@ class GhostAgent(BaseGhostAgent):
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
     def step(self, map_state, my_position, enemy_position, step_number):
-            self.start_time = time.perf_counter()
-            self.TIME_LIMIT = 0.85 # Dành 0.15s dự phòng để không bao giờ bị quá 1 giây
-            self.map_state = map_state
+        start_time = time.perf_counter()
+        bfs_pacman_time = 0
+        bfs_ghost_time = 0
 
-            # 1. TÍNH BFS GỐC ĐỂ SẮP XẾP ƯU TIÊN (Sort Candidates)
-            # Giúp Alpha-Beta Pruning cắt tỉa nhánh cực nhanh
-            root_pacman_distances = self._bfs_full(enemy_position, map_state)
+        # 1. BFS TỪ PACMAN: Tính số ô thực tế từ Pacman tới mọi vị trí
+        bfs_pacman_start = time.perf_counter()
+        pacman_queue = deque([(enemy_position, 0)])
+        pacman_distances = {enemy_position: 0}
 
-            candidates = []
-            for next_pos, move in self._get_neighbors(my_position, map_state):
-                candidates.append((next_pos, move))
-            candidates.append((my_position, Move.STAY))
+        while pacman_queue:
+            pos, dist = pacman_queue.popleft()
+            for next_pos, _ in self._get_neighbors(pos, map_state):
+                if next_pos not in pacman_distances:
+                    pacman_distances[next_pos] = dist + 1
+                    pacman_queue.append((next_pos, dist + 1))
+        bfs_pacman_time = time.perf_counter() - bfs_pacman_start
 
-            # Sắp xếp: Ưu tiên thử những bước chạy xa Pacman nhất trước
-            candidates.sort(key=lambda x: -root_pacman_distances.get(x[0], 0))
-
-            best_move = Move.STAY
-            best_score = -float('inf')
-            alpha = -float('inf')
-            beta = float('inf')
-
-            # ĐỘ SÂU (DEPTH): Nhìn trước 4 lượt (Ghost -> Pacman -> Ghost -> Pacman)
-            MAX_DEPTH = 4
-
-            for next_pos, move in candidates:
-                # Time Guard: Nếu tính toán sắp lố 1 giây, dừng ngay và dùng kết quả tốt nhất hiện tại
-                if time.perf_counter() - self.start_time > self.TIME_LIMIT:
-                    print(f"[Ghost] Step {step_number} | Timeout Guard Triggered!")
-                    break
-
-                # 2. CHẠY MINIMAX DỰ ĐOÁN TƯƠNG LAI
-                score = self._minimax(
-                    ghost_pos = next_pos,
-                    pacman_pos = enemy_position,
-                    depth = MAX_DEPTH - 1,
-                    is_ghost = False, # Lượt tiếp theo là của Pacman
-                    alpha = alpha,
-                    beta = beta
-                )
-
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-                
-                if best_score > alpha:
-                    alpha = best_score
-
-            elapsed = time.perf_counter() - self.start_time
-            print(f"[Ghost] Step {step_number} | Move: {best_move} | Score: {best_score} | Time: {elapsed:.4f}s")
-            return best_move
-
-    # ════════════════════════════════════════════════════
-    #  THUẬT TOÁN MINIMAX & ALPHA-BETA PRUNING
-    # ════════════════════════════════════════════════════
-    def _minimax(self, ghost_pos, pacman_pos, depth, is_ghost, alpha, beta):
-        # Base case 1: Pacman bắt được Ghost -> Điểm âm cực nặng, nhưng cộng thêm depth để "chết muộn nhất có thể"
-        if ghost_pos == pacman_pos:
-            return -1000000 + depth 
-
-        # Base case 2: Hết độ sâu hoặc hết thời gian -> Gọi hàm đánh giá 11-step của bạn
-        if depth == 0 or time.perf_counter() - self.start_time > self.TIME_LIMIT:
-            return self._evaluate_11_step(ghost_pos, pacman_pos)
-
-        if is_ghost:
-            # LƯỢT CỦA GHOST (Cố gắng MAXIMIZE điểm số)
-            best = -float('inf')
-            moves = self._get_neighbors(ghost_pos, self.map_state)
-            moves.append((ghost_pos, Move.STAY))
-            
-            for next_pos, _ in moves:
-                val = self._minimax(next_pos, pacman_pos, depth - 1, False, alpha, beta)
-                best = max(best, val)
-                alpha = max(alpha, best)
-                if beta <= alpha:
-                    break # Alpha-Beta Pruning
-            return best
-        else:
-            # LƯỢT CỦA PACMAN (Cố gắng MINIMIZE điểm số của Ghost)
-            best = float('inf')
-            pacman_nexts = self._get_pacman_next_positions(pacman_pos)
-            
-            for next_pac in pacman_nexts:
-                val = self._minimax(ghost_pos, next_pac, depth - 1, True, alpha, beta)
-                best = min(best, val)
-                beta = min(beta, best)
-                if beta <= alpha:
-                    break # Alpha-Beta Pruning
-            return best
-
-    # ════════════════════════════════════════════════════
-    #  HÀM ĐÁNH GIÁ (HEURISTIC) TỪ BẢN 11-STEP CỦA BẠN
-    # ════════════════════════════════════════════════════
-    def _evaluate_11_step(self, ghost_pos, pacman_pos):
-        """
-        Đây là linh hồn giúp Ghost đạt 11-step. 
-        Được gọi ở các "lá" của cây Minimax để chấm điểm cục diện.
-        """
-        # 1. Khoảng cách BFS thực tế (Chính xác 100%, đập tan sai lầm dùng Manhattan của Claude)
-        p_dist = self._bfs_dist(pacman_pos, ghost_pos)
+        # 2. BFS TỪ GHOST: Tìm vùng an toàn có tính đến TỐC ĐỘ X2 CỦA PACMAN
+        bfs_ghost_start = time.perf_counter()
+        ghost_queue = deque([my_position])
+        ghost_distances = {my_position: 0}
+        parent = {} 
         
-        if p_dist <= 1:
-            return -500000
-
-        # 2. Quét vùng an toàn (Flood Fill) để né ngõ cụt
-        ghost_queue = deque([ghost_pos])
-        visited = {ghost_pos, pacman_pos} # Cấm đi xuyên qua người Pacman
-        safe_area = 0
+        best_target = my_position
+        max_dist_to_pacman = pacman_distances.get(my_position, 0)
 
         while ghost_queue:
             curr = ghost_queue.popleft()
-            safe_area += 1
+            ghost_d = ghost_distances[curr]
             
-            # Quét tối đa 25 ô là đủ biết ngõ cụt hay không gian mở, tiết kiệm thời gian
-            if safe_area >= 25:
-                break
+            curr_pacman_d = pacman_distances.get(curr, 0)
+            if curr_pacman_d > max_dist_to_pacman:
+                max_dist_to_pacman = curr_pacman_d
+                best_target = curr
+            
+            for next_pos, move in self._get_neighbors(curr, map_state):
+                if next_pos not in ghost_distances:
+                    next_ghost_d = ghost_d + 1
+                    next_pacman_d = pacman_distances.get(next_pos, 0)
+                    
+                    pacman_min_time_to_reach = next_pacman_d / 2.0 
+                    
+                    if next_ghost_d < pacman_min_time_to_reach: 
+                        ghost_distances[next_pos] = next_ghost_d
+                        parent[next_pos] = (curr, move)
+                        ghost_queue.append(next_pos)
+        bfs_ghost_time = time.perf_counter() - bfs_ghost_start
+
+        # 3. RA QUYẾT ĐỊNH & FALLBACK (NÉ NGÕ CỤT)
+        best_move = Move.STAY
+        
+        if best_target != my_position:
+            path = self._reconstruct_path(parent, my_position, best_target)
+            if path:
+                best_move = path[0]
+        else:
+            best_fallback_score = -float('inf')
+            
+            for next_pos, move in self._get_neighbors(my_position, map_state):
+                p_dist = pacman_distances.get(next_pos, 0)
+                score = p_dist
                 
-            for nxt, _ in self._get_neighbors(curr, self.map_state):
-                if nxt not in visited:
-                    visited.add(nxt)
-                    ghost_queue.append(nxt)
+                free_neighbors = len(self._get_neighbors(next_pos, map_state))
+                
+                if free_neighbors <= 1:
+                    score -= 100 
 
-        # 3. CÔNG THỨC 11-STEP HUYỀN THOẠI
-        score = (p_dist * 1000) + safe_area
+                if score > best_fallback_score:
+                    best_fallback_score = score
+                    best_move = move
 
-        # Khóa chặn ngõ cụt: Nếu vùng an toàn < 15, đây chắc chắn là ngõ cụt chết người!
-        if safe_area < 15:
-            score -= 50000
+        # ------- BENCHMARK -------
+        total_time = time.perf_counter() - start_time
+        mode = 'Escape' if best_target != my_position else 'Survival'
+        print(f"[Ghost] Step {step_number} | Mode: {mode} | Target Dist: {max_dist_to_pacman} | Total: {total_time:.6f}s | BFS Pacman: {bfs_pacman_time:.6f}s | BFS Ghost: {bfs_ghost_time:.6f}s")
 
-        return score
-
-    # ════════════════════════════════════════════════════
-    #  CÁC HÀM TIỆN ÍCH HỖ TRỢ MINIMAX
-    # ════════════════════════════════════════════════════
-    def _get_pacman_next_positions(self, pacman_pos):
-        """Mô phỏng chính xác khả năng đi 2 ô/bước trên đường thẳng của Pacman"""
-        positions = set()
-        for nxt, move in self._get_neighbors(pacman_pos, self.map_state):
-            positions.add(nxt)
-            # Khả năng nhảy 2 ô thẳng
-            dr, dc = move.value
-            pos2 = (nxt[0] + dr, nxt[1] + dc)
-            if self._is_valid_position(pos2, self.map_state):
-                positions.add(pos2)
-        return list(positions) if positions else [pacman_pos]
-
-    def _bfs_full(self, start, map_state):
-        dist = {start: 0}
-        queue = deque([start])
-        while queue:
-            pos = queue.popleft()
-            d = dist[pos]
-            for nxt, _ in self._get_neighbors(pos, map_state):
-                if nxt not in dist:
-                    dist[nxt] = d + 1
-                    queue.append(nxt)
-        return dist
-
-    def _bfs_dist(self, start, target):
-        """Chạy mini-BFS siêu tốc để tìm khoảng cách giữa 2 điểm bất kỳ"""
-        if start == target: return 0
-        queue = deque([start])
-        dist = {start: 0}
-        while queue:
-            curr = queue.popleft()
-            d = dist[curr]
-            if curr == target: 
-                return d
-            for nxt, _ in self._get_neighbors(curr, self.map_state):
-                if nxt not in dist:
-                    dist[nxt] = d + 1
-                    queue.append(nxt)
-        return 999
+        return best_move
+    
     # Helper methods
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
         """Return True if pos is inside the grid and not a wall."""
