@@ -96,31 +96,20 @@ class PacmanAgent(BasePacmanAgent):
 
         return []
     
-    def predict_enemy_move(self, enemy_pos, my_pos, map_state):
-        """Predict enemy's next move (assume they move away from us)."""
-        best_move = Move.STAY
-        best_distance = -1 # Để đảm bảo lấy được ít nhất 1 move hợp lệ
-        
-        # Danh sách các nước đi có thể của Ghost
-        possible_moves = self._get_neighbors(enemy_pos, map_state)
-
-        # Duyệt các ô Ghost có thể đi tới
-        for next_pos, move in possible_moves:
-            # Tính khoảng cách Manhattan từ ô đó tới Pacman
-            distance = self.dist_map.get(next_pos, 0)
-
-            # TIE-BREAKING: Thêm một chút noise dựa trên tọa độ 
-            # để không bao giờ có 2 ô bằng điểm tuyệt đối
-            # --> tránh trường hợp pacman nhảy qa nhảy lại 
-            tie_breaker = (next_pos[0] * 0.01) + (next_pos[1] * 0.001)
-            current_score = distance + tie_breaker
-            
-            if current_score > best_distance:
-                best_distance = current_score
-                best_move = move
-        
-        # Trả về vị trí dự đoán (ô mà Ghost sẽ ở đó để xa Pacman nhất)
-        return self._apply_move(enemy_pos, best_move)
+    def predict_enemy_move(self, enemy_pos, my_pos, map_state, steps=2):
+        """Predict Ghost sẽ ở đâu sau N bước."""
+        current = enemy_pos
+        for _ in range(steps):
+            best_move = Move.STAY
+            best_dist = -1
+            for next_pos, move in self._get_neighbors(current, map_state):
+                dist = self.dist_map.get(next_pos, 0)
+                if dist > best_dist:
+                    best_dist = dist
+                    best_move = move
+                    best_next = next_pos
+            current = best_next if best_dist > -1 else current
+        return current
     
     def step(self, map_state: np.ndarray, 
          my_position: tuple, 
@@ -147,7 +136,7 @@ class PacmanAgent(BasePacmanAgent):
         bfs_time = 0
 
         # ------- DISTANCE MAP -------
-        self.dist_map = self._bfs_distance_map(my_position, map_state)
+        self.dist_map = self._bfs_distance_map(enemy_position, map_state)
 
         # ------- GET TARGET -------
         dist_to_ghost = self.dist_map.get(enemy_position, float('inf'))
@@ -163,7 +152,9 @@ class PacmanAgent(BasePacmanAgent):
         # ------- REPLANNING -------
         # Replan mỗi bước vì Ghost luôn di chuyển → path cũ luôn lỗi thời
         if not self.current_path or self.last_enemy_pos != enemy_position:
+            bfs_start = time.perf_counter()  # ← thêm
             self.current_path = self.bfs(my_position, target_pos, map_state)
+            bfs_time = time.perf_counter() - bfs_start  # ← thêm
             self.last_enemy_pos = enemy_position        
         else:
             bfs_time = 0
@@ -193,26 +184,19 @@ class PacmanAgent(BasePacmanAgent):
         # ------- MULTI-STEP LOGIC -------
         # Rule: đi thẳng (same direction) → 2 bước
         #       quẹo (different direction) → 1 bước
-        first_move = self.current_path.pop(0)
-        steps_to_move = 1
+        else:
+            first_move = self.current_path.pop(0)
+            steps_to_move = 1
 
-        if self.current_path and self.pacman_speed >= 2:
-            second_move = self.current_path[0]  # nhìn trước move tiếp theo
-            
-            if second_move == first_move:
-                # Đi thẳng → thử đi 2 bước
-                actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
-                if actual_steps == 2:
-                    self.current_path.pop(0)  # consume thêm 1 move vì đã đi 2 bước
-                    steps_to_move = 2
-                else:
-                    # Wall chặn bước 2 → chỉ đi 1
-                    steps_to_move = 1
-            else:
-                # Quẹo → chỉ đi 1 bước
-                steps_to_move = 1
+            if self.current_path and self.pacman_speed >= 2:
+                second_move = self.current_path[0]
+                if second_move == first_move:
+                    actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+                    if actual_steps == 2:
+                        self.current_path.pop(0)
+                        steps_to_move = 2
                 
-        result = (first_move, steps_to_move)
+            result = (first_move, steps_to_move)
 
         # ------- BENCHMARK -------
         total_time = time.perf_counter() - start_time
