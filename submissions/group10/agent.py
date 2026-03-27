@@ -151,29 +151,7 @@ class PacmanAgent(BasePacmanAgent):
 
         # ------- GET TARGET -------
         dist_to_ghost = self.dist_map.get(enemy_position, float('inf'))
-        
-        # ------- THE FINAL STRIKE -------
-        if dist_to_ghost == 1:
-            # Dự đoán ô tiếp theo Ghost sẽ tới (ô mà Ghost nghĩ là an toàn nhất)
-            target_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
-            
-            # Tìm đường đến ô dự đoán đó
-            path_to_target = self.bfs(my_position, target_pos, map_state)
-
-            if path_to_target:
-                move = path_to_target[0]
-                # Kiểm tra xem có thể nhảy 2 bước đến đó không (không vướng tường)
-                actual_steps = self._max_valid_steps(my_position, move, map_state, 2)
-                
-                # Nếu nhảy 2 bước tới đúng Target
-                if actual_steps >= 1:
-                    return (move, actual_steps)
-                
-            # Fallback: Nếu không nhảy 2 bước được, bước thẳng vào ô hiện tại của Ghost
-            path_direct = self.bfs(my_position, enemy_position, map_state)
-            if path_direct:
-                return (path_direct[0], 1)
-            
+                    
         # Nếu ghost cách 2 bước --> nhắm thẳng vào ghost
         if dist_to_ghost <= self.pacman_speed:
             target_pos = enemy_position
