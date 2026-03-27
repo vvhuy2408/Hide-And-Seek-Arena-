@@ -286,7 +286,8 @@ class GhostAgent(BaseGhostAgent):
         
         moves = self._get_neighbors(ghost_pos, map_state)
         if not moves:
-            return Move.STAY, -1000000
+            # Sửa lỗi: Phạt nặng và cộng thêm -depth để không tự tử
+            return Move.STAY, -1000000 - depth
             
         # Root Move Ordering: Ghost wants to MAXIMIZE distance from Pacman's root
         moves.sort(key=lambda x: -p_root_dist.get(x[0], 0))
@@ -305,9 +306,9 @@ class GhostAgent(BaseGhostAgent):
         return best_move, best_score
 
     def _minimax(self, ghost_pos, pacman_pos, depth, is_ghost, alpha, beta, map_state, p_root_dist, g_root_dist):
-        # Terminal State: Ghost Caught
+        # SỬA LỖI TỰ TỬ TẠI ĐÂY: Dấu '-' giúp nó thà chết muộn còn hơn chết sớm!
         if ghost_pos == pacman_pos:
-            return -1000000 + depth  
+            return -1000000 - depth  
 
         # Horizon Reached or Time Out Triggered
         if depth == 0 or time.perf_counter() - self.start_time > self.TIME_LIMIT:
@@ -326,7 +327,9 @@ class GhostAgent(BaseGhostAgent):
         if is_ghost:
             best_val = -float('inf')
             moves = self._get_neighbors(ghost_pos, map_state)
-            if not moves: return -1000000 + depth
+            if not moves: 
+                # Sửa lỗi: Cập nhật hình phạt chết do bị nhốt
+                return -1000000 - depth
                 
             # Move Ordering: Ghost maximizes distance from Pacman's origin
             moves.sort(key=lambda x: -p_root_dist.get(x[0], 0))
@@ -502,3 +505,4 @@ class GhostAgent(BaseGhostAgent):
                         return self._reconstruct_path(parent, start, goal)
                     queue.append(next_pos)
         return [Move.STAY]
+    
