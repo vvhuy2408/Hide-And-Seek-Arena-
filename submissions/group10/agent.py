@@ -276,6 +276,9 @@ class GhostAgent(BaseGhostAgent):
 
             depth += 1
 
+        total_time = time.perf_counter() - self.start_time
+        print(f"[Ghost] Step {step_number} | Total: {total_time:.6f}s")
+        
         return best_move
 
     def _search_root(self, ghost_pos, pacman_pos, depth, map_state, p_root_dist, g_root_dist):
