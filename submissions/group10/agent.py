@@ -294,7 +294,8 @@ class GhostAgent(BaseGhostAgent):
     def step(self, map_state, my_position, enemy_position, step_number):
         self.start_time = time.perf_counter()
         self.TIME_LIMIT = 0.82 
-        self.tt.clear()
+        if len(self.tt) > 50000:
+            self.tt.clear()
 
         # 1. Topological Map Analysis (O(V) - Runs strictly ONCE per map layout)
         wall_mask = (map_state == 1).tobytes()
@@ -345,7 +346,6 @@ class GhostAgent(BaseGhostAgent):
         
         moves = self._get_neighbors(ghost_pos, map_state)
         if not moves:
-            # Sửa lỗi: Phạt nặng và cộng thêm -depth để không tự tử
             return Move.STAY, -1000000 - depth
             
         # Root Move Ordering: Ghost wants to MAXIMIZE distance from Pacman's root
@@ -365,7 +365,7 @@ class GhostAgent(BaseGhostAgent):
         return best_move, best_score
 
     def _minimax(self, ghost_pos, pacman_pos, depth, is_ghost, alpha, beta, map_state, p_root_dist, g_root_dist):
-        # SỬA LỖI TỰ TỬ TẠI ĐÂY: Dấu '-' giúp nó thà chết muộn còn hơn chết sớm!
+        # Terminal State: Ghost Caught
         if ghost_pos == pacman_pos:
             return -1000000 - depth  
 
@@ -377,9 +377,14 @@ class GhostAgent(BaseGhostAgent):
         tt_key = (ghost_pos, pacman_pos, is_ghost, depth)
         if tt_key in self.tt:
             entry = self.tt[tt_key]
-            if entry['type'] == 'exact': return entry['val']
-            if entry['type'] == 'lower' and entry['val'] >= beta: return entry['val']
-            if entry['type'] == 'upper' and entry['val'] <= alpha: return entry['val']
+            if entry['type'] == 'exact':
+                return entry['val']
+            if entry['type'] == 'lower':
+                alpha = max(alpha, entry['val'])  
+            if entry['type'] == 'upper':
+                beta = min(beta, entry['val'])    
+            if alpha >= beta:
+                return entry['val']
 
         orig_alpha = alpha
 
@@ -387,7 +392,6 @@ class GhostAgent(BaseGhostAgent):
             best_val = -float('inf')
             moves = self._get_neighbors(ghost_pos, map_state)
             if not moves: 
-                # Sửa lỗi: Cập nhật hình phạt chết do bị nhốt
                 return -1000000 - depth
                 
             # Move Ordering: Ghost maximizes distance from Pacman's origin
@@ -564,4 +568,3 @@ class GhostAgent(BaseGhostAgent):
                         return self._reconstruct_path(parent, start, goal)
                     queue.append(next_pos)
         return [Move.STAY]
-    
