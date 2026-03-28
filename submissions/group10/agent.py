@@ -371,7 +371,7 @@ class GhostAgent(BaseGhostAgent):
 
         # Horizon Reached or Time Out Triggered
         if depth == 0 or time.perf_counter() - self.start_time > self.TIME_LIMIT:
-            return self._evaluate(ghost_pos, pacman_pos, p_root_dist)
+            return self._evaluate(ghost_pos, pacman_pos, p_root_dist, g_root_dist)
 
         # Transposition Table Lookup
         tt_key = (ghost_pos, pacman_pos, is_ghost, depth)
@@ -423,7 +423,7 @@ class GhostAgent(BaseGhostAgent):
         
         return best_val
 
-    def _evaluate(self, ghost_pos, pacman_pos, p_root_dist):
+    def _evaluate(self, ghost_pos, pacman_pos, p_root_dist, g_root_dist):
         """
         O(1) Leaf Evaluation. 
         Pure math and dictionary lookups. No loops, no arrays, no BFS.
@@ -439,6 +439,13 @@ class GhostAgent(BaseGhostAgent):
         
         # Blend Exact Maze Distance and Immediate Manhattan threat
         score = (maze_dist * 100) + (manhattan * 10)
+        
+          # Voronoi: đếm ô Ghost kiểm soát (đến được trước Pacman)
+        ghost_territory = sum(
+            1 for pos, g_d in g_root_dist.items()
+            if g_d < p_root_dist.get(pos, 9999)
+        )
+        score += ghost_territory * 20  # reward kiểm soát nhiều ô hơn
 
         # 1. Topological Threat: Massive penalty for dead-ends
         trap_depth = self.dead_ends.get(ghost_pos, 0)
