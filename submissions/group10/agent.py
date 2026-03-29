@@ -76,13 +76,13 @@ class PacmanAgent(BasePacmanAgent):
         while queue:
             current = queue.popleft()
             
-            # Lấy danh sách hàng xóm
+            # Get list of neighbors
             neighbors = self._get_neighbors(current, map_state)
 
-            # --- TIE-BREAKING LOGIC: Ưu tiên hướng không đổi ---
+            # --- TIE-BREAKING LOGIC: Prioritize unchanged direction ---
             if current in parent:
                 _, prev_move = parent[current]
-                # Đưa hướng trùng với hướng trước đó lên đầu danh sách duyệt
+                # Put direction matching previous direction at the start of traversal list
                 neighbors.sort(key=lambda x: x[1] != prev_move)
 
             for next_pos, move in neighbors:
@@ -97,7 +97,7 @@ class PacmanAgent(BasePacmanAgent):
         return []
     
     def predict_enemy_move(self, enemy_pos, my_pos, map_state, steps=2):
-        """Predict Ghost sẽ ở đâu sau N bước."""
+        """Predict where Ghost will be after N steps."""
         current = enemy_pos
         for _ in range(steps):
             best_move = Move.STAY
@@ -120,7 +120,7 @@ class PacmanAgent(BasePacmanAgent):
         
         Strategy:
             - Use BFS to find shortest path to Ghost
-            - Replan every step vì Ghost luôn di chuyển
+            - Replan every step because Ghost always moves
             - Move 2 steps if going straight, 1 step if turning
         
         Args:
@@ -141,36 +141,36 @@ class PacmanAgent(BasePacmanAgent):
         # ------- GET TARGET -------
         dist_to_ghost = self.dist_map.get(enemy_position, float('inf'))
                     
-        # Nếu ghost cách 2 bước --> nhắm thẳng vào ghost
+        # If ghost is 2 steps away -> aim straight at ghost
         if dist_to_ghost <= self.pacman_speed:
             target_pos = enemy_position
         else:
             # ------- PREDICTIVE -------
-            # Dự đoán vị trí ghost, nhắm vào vị trí đã dự đoán
+            # Predict ghost position, aim at predicted position
             target_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
 
         # ------- REPLANNING -------
-        # Replan mỗi bước vì Ghost luôn di chuyển → path cũ luôn lỗi thời
+        # Replan every step because Ghost always moves -> old path always becomes outdated
         if not self.current_path or self.last_enemy_pos != enemy_position:
-            bfs_start = time.perf_counter()  # ← thêm
+            bfs_start = time.perf_counter()  # <- added
             self.current_path = self.bfs(my_position, target_pos, map_state)
-            bfs_time = time.perf_counter() - bfs_start  # ← thêm
+            bfs_time = time.perf_counter() - bfs_start  # <- added
             self.last_enemy_pos = enemy_position        
         else:
             bfs_time = 0
 
         # ------- EDGE CASE: NO PATH -------
-        # Xảy ra khi Ghost bị cô lập hoàn toàn bởi wall
-        # → đứng yên chờ hết max_steps, Ghost tự thắng
+        # Occurs when Ghost is completely isolated by walls
+        # -> stay still wait for max_steps, Ghost wins automatically
         if not self.current_path or self.current_path == [Move.STAY]:
-            # Chọn hướng có nhiều lối thoát nhất thay vì đứng yên (Move.STAY)
+            # Choose direction with most exits instead of staying still (Move.STAY)
             best_fallback = Move.STAY
             best_score = -1
 
             for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
                 next_p = self._apply_move(my_position, move)
                 if self._is_valid_position(next_p, map_state):
-                    # Heuristic tránh dead-end
+                    # Heuristic avoid dead-end
                     freedom = len(self._get_neighbors(next_p, map_state))
                     ghost_dist = self.dist_map.get(next_p, 0)
                     score = ghost_dist + 0.5 * freedom
@@ -182,8 +182,8 @@ class PacmanAgent(BasePacmanAgent):
             result = (best_fallback, 1)
 
         # ------- MULTI-STEP LOGIC -------
-        # Rule: đi thẳng (same direction) → 2 bước
-        #       quẹo (different direction) → 1 bước
+        # Rule: go straight (same direction) -> 2 steps
+        #       turn (different direction) -> 1 step
         else:
             first_move = self.current_path.pop(0)
             steps_to_move = 1
@@ -440,12 +440,12 @@ class GhostAgent(BaseGhostAgent):
         # Blend Exact Maze Distance and Immediate Manhattan threat
         score = (maze_dist * 100) + (manhattan * 10)
         
-          # Voronoi: đếm ô Ghost kiểm soát (đến được trước Pacman)
+        # Voronoi: count cells Ghost controls (reach before Pacman)
         ghost_territory = sum(
             1 for pos, g_d in g_root_dist.items()
             if g_d < p_root_dist.get(pos, 9999)
         )
-        score += ghost_territory * 20  # reward kiểm soát nhiều ô hơn
+        score += ghost_territory * 20  # reward control more cells
 
         # 1. Topological Threat: Massive penalty for dead-ends
         trap_depth = self.dead_ends.get(ghost_pos, 0)
