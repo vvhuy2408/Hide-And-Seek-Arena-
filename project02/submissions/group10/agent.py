@@ -33,6 +33,43 @@ import numpy as np
 # performance benchmark
 import time
 
+class MemoryMap:
+    def __init__(self):
+        self.known_walls = set()       # các ô chắc chắn là tường
+        self.known_empty = set()       # các ô chắc chắn là đường đi
+        self.last_seen_enemy = None    # vị trí địch lần cuối thấy
+        self.step_last_seen = 0        # bước nào thấy lần cuối
+
+    def update(self, map_state, my_pos, enemy_pos, step_number):
+        # Cập nhật bản đồ đã biết
+        rows, cols = map_state.shape
+        for r in range(rows):
+            for c in range(cols):
+                if map_state[r][c] == 1:
+                    self.known_walls.add((r, c))
+                elif map_state[r][c] == 0:
+                    self.known_empty.add((r, c))
+                # map_state[r][c] == -1 -> bỏ qua, không ghi gì
+
+        # Cập nhật vị trí địch
+        if enemy_pos is not None:
+            self.last_seen_enemy = enemy_pos
+            self.step_last_seen = step_number
+            
+    def get_safe_neighbors(self, pos, map_state):
+        x, y = pos
+        rows, cols = map_state.shape
+        neighbors = []
+        for (dx, dy), move in [
+            ((-1,0), Move.UP), ((1,0), Move.DOWN),
+            ((0,-1), Move.LEFT), ((0,1), Move.RIGHT)
+        ]:
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < rows and 0 <= ny < cols:
+                if map_state[nx][ny] == 0:   # chỉ đi vào ô đã biết là trống
+                    neighbors.append(((nx, ny), move))
+        return neighbors
+    
 class PacmanAgent(BasePacmanAgent):
     """
     Pacman (Seeker) Agent - Goal: Catch the Ghost
@@ -44,7 +81,7 @@ class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-
+        self.memory = MemoryMap() # memory map for project 02
         # path catching
         self.current_path = []
         self.last_enemy_pos = None
@@ -285,7 +322,7 @@ class GhostAgent(BaseGhostAgent):
         super().__init__(**kwargs)
         self.name = "Grandmaster Ghost"
         self.pacman_speed = kwargs.get('pacman_speed', 2)
-        
+        self.memory = MemoryMap() # memory map for project 02
         self.tt = {}
         self.map_hash = None
         self.dead_ends = {}
