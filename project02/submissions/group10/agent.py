@@ -198,8 +198,8 @@ class PacmanAgent(BasePacmanAgent):
 
 class GhostAgent(BaseGhostAgent):
     """
-    Ghost (Hider) Agent - Competition Ready (Tabu Search + Minimax + Fog Evasion)
-    Optimized for massive maps, zero crashes, extreme Minimax depth, and Partial Observability.
+    Ghost (Hider) Agent - Strategic Relocation Edition
+    Features: Memory Integration, Global Fog Targeting, Minimax Evasion, Zero Ping-Pong.
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -214,8 +214,8 @@ class GhostAgent(BaseGhostAgent):
         self.dead_ends = {}
         self.intersections = set()
         
-        # FIX TRIỆT ĐỂ: Ghi nhớ lịch sử mọi ô đã đi qua để chống đi vòng tròn
-        self.visit_count = {}
+        # MỤC TIÊU KHÁM PHÁ TOÀN CỤC
+        self.exploration_target = None
 
     def step(self, map_state, my_position, enemy_position, step_number):
         self.start_time = time.perf_counter()
@@ -223,16 +223,11 @@ class GhostAgent(BaseGhostAgent):
         if len(self.tt) > 50000:
             self.tt.clear()
 
-        # Đánh dấu ô hiện tại đã được dẫm lên thêm 1 lần
-        self.visit_count[my_position] = self.visit_count.get(my_position, 0) + 1
-
-        # 1. MEMORY INTEGRATION: Update at the START of step()
+        # 1. CẬP NHẬT BỘ NHỚ
         self.memory.update(map_state, my_position, enemy_position, step_number)
-        
-        # Determine actual threat (current or last seen)
         threat = enemy_position or self.memory.last_seen_enemy
 
-        # 2. Topological Map Analysis (O(V) - Runs strictly ONCE per map layout)
+        # 2. PHÂN TÍCH ĐỊA HÌNH
         wall_mask = (map_state == 1).tobytes()
         current_map_hash = hash(wall_mask)
         if self.map_hash != current_map_hash:
@@ -244,18 +239,49 @@ class GhostAgent(BaseGhostAgent):
         # Emergency Fallback Guarantee
         if not valid_moves:
             return Move.STAY
-            
-        best_move = valid_moves[0][1]
 
-        # 3. EARLY GAME FALLBACK: Handle Invisible Pacman
-        if threat is None:
-            return self._early_game_fallback(my_position, valid_moves, map_state)
-
-        # 4. Dual-Root BFS (O(V) - Runs exactly ONCE per step)
-        p_root_dist = self._bfs_full(threat, map_state)
+        p_root_dist = self._bfs_full(threat, map_state) if threat else {}
         g_root_dist = self._bfs_full(my_position, map_state)
+        
+        # Kiểm tra khoảng cách nguy hiểm
+        danger_dist = p_root_dist.get(my_position, 9999)
 
-        # 5. Iterative Deepening Minimax
+        # 3. QUYẾT ĐỊNH CHẾ ĐỘ HOẠT ĐỘNG (Relocate vs Evade)
+        # NẾU an toàn (> 8 bước) HOẶC chưa từng thấy Pacman -> Chế độ Chủ động tẩu thoát vào sương mù
+        if threat is None or danger_dist > 8:
+            
+            # Reset target nếu đã đến nơi
+            if self.exploration_target == my_position:
+                self.exploration_target = None
+                
+            # Tìm một target sương mù toàn cục mới
+            if not self.exploration_target:
+                self.exploration_target = self._find_best_fog_target(my_position, threat, map_state, g_root_dist, p_root_dist)
+                
+            # Đi theo BFS đến target (Kiên định, không ping-pong)
+            if self.exploration_target:
+                path = self.bfs(my_position, self.exploration_target, map_state)
+                if path and path[0] != Move.STAY:
+                    print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target}")
+                    return path[0]
+
+            # [FIX LỖI CRASH TẠI ĐÂY]: Nếu không tìm được đường tới target mà threat vẫn = None
+            # Ta KHÔNG được chạy Minimax (vì không có vị trí Pacman). Thay vào đó, chọn hướng an toàn nhất.
+            if threat is None:
+                best_fallback = Move.STAY
+                best_deg = -1
+                for nxt, move in valid_moves:
+                    deg = len(self._get_neighbors(nxt, map_state))
+                    if deg > best_deg:
+                        best_deg = deg
+                        best_fallback = move
+                return best_fallback
+
+        # 4. KÍCH HOẠT MINIMAX (Khi nguy hiểm <= 8 bước)
+        # Hủy mục tiêu khám phá vì phải lo giữ mạng
+        self.exploration_target = None 
+        
+        best_move = valid_moves[0][1]
         depth = 1
         while True:
             if time.perf_counter() - self.start_time > self.TIME_LIMIT:
@@ -271,41 +297,47 @@ class GhostAgent(BaseGhostAgent):
             depth += 1
 
         total_time = time.perf_counter() - self.start_time
-        print(f"[Ghost] Step {step_number} | Depth: {depth-1} | Total: {total_time:.6f}s")
-        
+        print(f"[Ghost] Step {step_number} | EVADING Minimax Depth {depth-1} | Time: {total_time:.4f}s")
         return best_move
 
-    def _early_game_fallback(self, my_position, valid_moves, map_state):
-        """Fallback for when Pacman is completely unknown (start of game)."""
-        best_move = Move.STAY
-        best_score = -float('inf')
+    def _find_best_fog_target(self, my_pos, threat_pos, map_state, g_dist, p_dist):
+        """Tìm 1 ô sương mù AN TOÀN và XA PACMAN nhất trên toàn bản đồ làm đích đến."""
         h, w = map_state.shape
-        
-        for nxt, move in valid_moves:
-            r, c = nxt
-            rmin, rmax = max(0, r-2), min(h, r+3)
-            cmin, cmax = max(0, c-2), min(w, c+3)
-            
-            # Đếm sương mù bằng TRÍ NHỚ
-            fog_density = 0
-            for rr in range(rmin, rmax):
-                for cc in range(cmin, cmax):
-                    if (rr, cc) not in self.memory.known_walls and (rr, cc) not in self.memory.known_empty:
-                        fog_density += 1
-            
-            trap_depth = self.dead_ends.get(nxt, 0)
-            degree = len(self._get_neighbors(nxt, map_state))
-            
-            score = (fog_density * 50) - (trap_depth * 10000) + (degree * 100)
-            
-            # TABU PENALTY: Trừ 20,000 điểm cho MỖI LẦN đã từng bước qua ô này
-            score -= self.visit_count.get(nxt, 0) * 20000
-            
-            if score > best_score:
-                best_score = score
-                best_move = move
-                
-        return best_move
+        best_target = None
+        best_score = -float('inf')
+
+        for r in range(h):
+            for c in range(w):
+                if map_state[r, c] == 1: continue # Bỏ qua tường
+                if (r, c) in self.dead_ends: continue # Tuyệt đối không chọn đích là ngõ cụt
+
+                # Định nghĩa Sương mù: Những ô chưa từng lưu vào known_empty của bộ nhớ
+                is_fog = (r, c) not in self.memory.known_empty and (r, c) not in self.memory.known_walls
+
+                if is_fog:
+                    dist_from_me = g_dist.get((r, c), 9999)
+                    if dist_from_me < 9999: # Đảm bảo đường đi tới đó không bị kẹt
+                        # Tính điểm: Càng xa Pacman càng tốt, nhưng ưu tiên điểm gần Ghost để dễ tới
+                        dist_from_threat = p_dist.get((r, c), 0) if threat_pos else 0
+                        score = (dist_from_threat * 10) - dist_from_me
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_target = (r, c)
+                            
+        # Nếu đã mở sáng toàn bộ bản đồ (hết sương mù), chọn điểm xa Pacman nhất làm target
+        if not best_target and threat_pos:
+            for r in range(h):
+                for c in range(w):
+                    if map_state[r, c] == 1 or (r, c) in self.dead_ends: continue
+                    dist_from_me = g_dist.get((r, c), 9999)
+                    if dist_from_me < 9999:
+                        score = p_dist.get((r, c), 0) * 10 - dist_from_me
+                        if score > best_score:
+                            best_score = score
+                            best_target = (r, c)
+
+        return best_target
 
     def _search_root(self, ghost_pos, pacman_pos, depth, map_state, p_root_dist, g_root_dist):
         alpha = -float('inf')
@@ -317,7 +349,7 @@ class GhostAgent(BaseGhostAgent):
         if not moves:
             return Move.STAY, -1000000 - depth
             
-        # Root Move Ordering
+        # Root Move Ordering: Ghost wants to MAXIMIZE distance from Pacman's root
         moves.sort(key=lambda x: -p_root_dist.get(x[0], 0))
 
         for next_pos, move in moves:
@@ -325,9 +357,6 @@ class GhostAgent(BaseGhostAgent):
                 break
                 
             score = self._minimax(next_pos, pacman_pos, depth - 1, False, alpha, beta, map_state, p_root_dist, g_root_dist)
-            
-            # TABU PENALTY TẠI MINIMAX: Ép Ghost tìm lối đi mới thay vì quẩn quanh
-            score -= self.visit_count.get(next_pos, 0) * 20000
             
             if score > best_score:
                 best_score = score
@@ -337,23 +366,22 @@ class GhostAgent(BaseGhostAgent):
         return best_move, best_score
 
     def _minimax(self, ghost_pos, pacman_pos, depth, is_ghost, alpha, beta, map_state, p_root_dist, g_root_dist):
+        # Terminal State: Ghost Caught
         if ghost_pos == pacman_pos:
             return -1000000 - depth  
 
+        # Horizon Reached or Time Out Triggered
         if depth == 0 or time.perf_counter() - self.start_time > self.TIME_LIMIT:
             return self._evaluate(ghost_pos, pacman_pos, p_root_dist, g_root_dist, map_state)
 
+        # Transposition Table Lookup
         tt_key = (ghost_pos, pacman_pos, is_ghost, depth)
         if tt_key in self.tt:
             entry = self.tt[tt_key]
-            if entry['type'] == 'exact':
-                return entry['val']
-            if entry['type'] == 'lower':
-                alpha = max(alpha, entry['val'])  
-            if entry['type'] == 'upper':
-                beta = min(beta, entry['val'])    
-            if alpha >= beta:
-                return entry['val']
+            if entry['type'] == 'exact': return entry['val']
+            if entry['type'] == 'lower': alpha = max(alpha, entry['val'])  
+            if entry['type'] == 'upper': beta = min(beta, entry['val'])    
+            if alpha >= beta: return entry['val']
 
         orig_alpha = alpha
 
@@ -383,6 +411,7 @@ class GhostAgent(BaseGhostAgent):
                 beta = min(beta, best_val)
                 if beta <= alpha: break
 
+        # Transposition Table Store
         tt_type = 'exact'
         if best_val <= orig_alpha: tt_type = 'upper'
         elif best_val >= beta: tt_type = 'lower'
@@ -399,20 +428,6 @@ class GhostAgent(BaseGhostAgent):
         maze_dist = p_root_dist.get(ghost_pos, 9999)
         score = (maze_dist * 100) + (manhattan * 10)
         
-        if maze_dist > 8:
-            r, c = ghost_pos
-            h, w = map_state.shape
-            rmin, rmax = max(0, r-2), min(h, r+3)
-            cmin, cmax = max(0, c-2), min(w, c+3)
-            
-            fog_density = 0
-            for rr in range(rmin, rmax):
-                for cc in range(cmin, cmax):
-                    if (rr, cc) not in self.memory.known_walls and (rr, cc) not in self.memory.known_empty:
-                        fog_density += 1
-                        
-            score += (fog_density * 40)
-            
         trap_depth = self.dead_ends.get(ghost_pos, 0)
         if trap_depth > 0:
             score -= (50000 - trap_depth * 100)
@@ -426,11 +441,16 @@ class GhostAgent(BaseGhostAgent):
         return score
 
     def _analyze_topology(self, map_state):
+        """
+        O(V) single-pass map analysis.
+        Identifies dead-ends, their depths, and vital intersections.
+        """
         h, w = map_state.shape
         degrees = {}
         self.intersections.clear()
         self.dead_ends.clear()
 
+        # Map degrees and intersections
         for r in range(h):
             for c in range(w):
                 if map_state[r, c] != 1:
@@ -439,6 +459,7 @@ class GhostAgent(BaseGhostAgent):
                     if deg >= 3:
                         self.intersections.add((r, c))
         
+        # Propagate dead-ends
         dead_ends_init = {pos: 1 for pos, deg in degrees.items() if deg <= 1}
         queue = deque(dead_ends_init.keys())
         self.dead_ends = dead_ends_init.copy()
@@ -524,3 +545,5 @@ class GhostAgent(BaseGhostAgent):
                         return self._reconstruct_path(parent, start, goal)
                     queue.append(next_pos)
         return [Move.STAY]
+    
+    
