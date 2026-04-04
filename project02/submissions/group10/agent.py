@@ -44,17 +44,22 @@ class MemoryMap:
     def update(self, map_state, my_pos, enemy_pos, step_number):
         # Cập nhật bản đồ đã biết - OPTIMIZED: only scan 5x5 local area
         rows, cols = map_state.shape
+        newly_found = set()
         
         # Only check 5x5 area around my_pos (MUCH faster than full scan)
         if map_state[my_pos[0], my_pos[1]] == 0:
             self.known_empty.add(my_pos)
         
-        for r in range(max(0, my_pos[0]-2), min(rows, my_pos[0]+3)):
-            for c in range(max(0, my_pos[1]-2), min(cols, my_pos[1]+3)):
+        for r in range(max(0, my_pos[0]-5), min(rows, my_pos[0]+6)):
+            for c in range(max(0, my_pos[1]-5), min(cols, my_pos[1]+6)):
                 if map_state[r][c] == 1:
                     self.known_walls.add((r, c))
+                    self.unknown_frontier.discard((r, c))
                 elif map_state[r][c] == 0:
+                    if (r, c) not in self.known_empty:
+                        newly_found.add((r, c))
                     self.known_empty.add((r, c))
+                    self.unknown_frontier.discard((r, c))
 
         # Cập nhật vị trí địch
         if enemy_pos is not None:
@@ -62,8 +67,8 @@ class MemoryMap:
             self.step_last_seen = step_number
             
         # Cập nhật biên giới khám phá (neighbor của known_empty là unknown)
-        self.unknown_frontier.clear()
-        for pos in self.known_empty:
+        # self.unknown_frontier.clear()
+        for pos in newly_found:
             x, y = pos
             for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)]:
                 nx, ny = x+dx, y+dy
@@ -89,24 +94,13 @@ class MemoryMap:
         """Tìm mục tiêu khám phá gần nhất trong unknown_frontier."""
         if not self.unknown_frontier:
             # Nếu không có frontier, dùng BFS để tìm ô trống bất kỳ
-            rows, cols = map_state.shape
-            for r in range(rows):
-                for c in range(cols):
-                    if map_state[r][c] == 0:
-                        return (r, c)
             return my_pos
         
-        best_frontier = min(self.unknown_frontier, 
-                   key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1]),
-                   default=None)
-
-        if best_frontier is None:
-            return my_pos
-
         # Tìm ô unknown gần nhất bằng Manhattan distance
-        best_target = min(self.known_empty, 
-                         key=lambda p: abs(p[0] - best_frontier[0]) + abs(p[1] - best_frontier[1]),
-                         default=my_pos)
+        best_target = min(
+            self.unknown_frontier, 
+            key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
+        )
         
         return best_target
     
@@ -123,71 +117,15 @@ class PacmanAgent(BasePacmanAgent):
         self.memory = MemoryMap()  # Khởi tạo memory ngay dòng đầu tiên
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         # path catching
+        self.capture_distance = int(kwargs.get("capture_distance", 1))
+        
         self.current_path = []
-        self.last_enemy_pos = None
-        self.dist_map = {}
+        self.last_enemy_pos = None 
+        
+        self.locked_target = None
+        self.target_lock_timer = 0       
+        
         self.name = "BFS Pacman"
-
-    def _bfs_distance_map(self, start, map_state):
-        queue = deque([(start, 0)])
-        dist = {start: 0}
-
-        while queue:
-            pos, d = queue.popleft()
-            for nxt, _ in self._get_neighbors(pos, map_state):
-                if nxt not in dist:
-                    dist[nxt] = d + 1
-                    queue.append((nxt, d + 1))
-        
-        return dist
-
-    def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
-        if start == goal:
-            return []
-        queue = deque([start])
-        visited = {start}
-        
-        # generate a parent map to store 
-        parent = {} # next_pos -> (current_pos, move)
-
-        while queue:
-            current = queue.popleft()
-            
-            # Get list of neighbors - chỉ đi qua ô đã biết là đường (get_safe_neighbors)
-            neighbors = self.memory.get_safe_neighbors(current, map_state)
-
-            # --- TIE-BREAKING LOGIC: Prioritize unchanged direction ---
-            if current in parent:
-                _, prev_move = parent[current]
-                # Put direction matching previous direction at the start of traversal list
-                neighbors.sort(key=lambda x: x[1] != prev_move)
-
-            for next_pos, move in neighbors:
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    parent[next_pos] = (current, move)
-                    # early stop
-                    if next_pos == goal:
-                        return self._reconstruct_path(parent, start, goal)
-                    queue.append(next_pos)
-
-        return []
-    
-    def predict_enemy_move(self, enemy_pos, my_pos, map_state, steps=2):
-        """Predict where Ghost will be after N steps."""
-        current = enemy_pos
-        for _ in range(steps):
-            best_move = Move.STAY
-            best_dist = -1
-            best_next = current  # Initialize for safety
-            for next_pos, move in self._get_neighbors(current, map_state):
-                dist = self.dist_map.get(next_pos, 0)
-                if dist > best_dist:
-                    best_dist = dist
-                    best_move = move
-                    best_next = next_pos
-            current = best_next if best_dist > -1 else current
-        return current
     
     def step(self, map_state: np.ndarray, 
          my_position: tuple, 
@@ -213,23 +151,23 @@ class PacmanAgent(BasePacmanAgent):
         start_time = time.perf_counter()
         bfs_time = 0
 
+        # ------- UPDATE MEMORY -------
+        self.memory.update(map_state, my_position, enemy_position, step_number)
+        
         # ------- INIT LOCK (chỉ chạy 1 lần) -------
         if not hasattr(self, "locked_target"):
             self.locked_target = None
             self.target_lock_timer = 0
 
-        # ------- UPDATE MEMORY -------
-        self.memory.update(map_state, my_position, enemy_position, step_number)
-        
         # ------- DISTANCE MAP -------
-        source = enemy_position if enemy_position is not None else my_position
+        source = my_position
         self.dist_map = self._bfs_distance_map(source, map_state)
 
         # ------- GET TARGET -------
         # priority: enemy_position > last_seen_enemy > exploration_target
         if enemy_position is not None:
             predicted = self.predict_enemy_move(enemy_position, my_position, map_state, steps=2)
-            new_target = predicted
+            new_target = self._get_capture_target(my_position, predicted, map_state)
         elif self.memory.last_seen_enemy is not None:
             new_target = self.memory.last_seen_enemy
         else:
@@ -238,7 +176,7 @@ class PacmanAgent(BasePacmanAgent):
         if new_target is None:
             new_target = my_position
 
-        # ------- TARGET LOCK (ANTI-RUNG) -------
+        # ------- TARGET LOCK -------
         if self.locked_target is None or self.target_lock_timer <= 0:
             self.locked_target = new_target
             self.target_lock_timer = 3  # giữ target trong 3 step
@@ -282,10 +220,10 @@ class PacmanAgent(BasePacmanAgent):
                         old_score = -abs(old_p[0] - target_pos[0]) - abs(old_p[1] - target_pos[1])
                         if new_score >= old_score:
                             self.current_path = new_path
-                        # else: giữ path cũ để tránh rung
                 else:
                     self.current_path = new_path
 
+            if enemy_position is not None:
                 self.last_enemy_pos = enemy_position        
 
         # ------- EDGE CASE: NO PATH -------
@@ -415,11 +353,95 @@ class PacmanAgent(BasePacmanAgent):
         cur = goal
 
         while cur != start:
-            cur, move = parent[cur]
+            prev, move = parent[cur]
             path.append(move)
+            cur = prev
 
         return path[::-1]
+    
+    def _bfs_distance_map(self, start, map_state):
+        queue = deque([(start, 0)])
+        dist = {start: 0}
+
+        while queue:
+            pos, d = queue.popleft()
+            # dùng get_safe_neighbors để dist_map phản ánh đúng vùng đã biết
+            for nxt, _ in self.memory.get_safe_neighbors(pos, map_state):
+                if nxt not in dist:
+                    dist[nxt] = d + 1
+                    queue.append((nxt, d + 1))
+        
+        return dist
+
+    def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
+        if start == goal:
+            return []
+        queue = deque([start])
+        visited = {start}
+        
+        # generate a parent map to store 
+        parent = {} # next_pos -> (current_pos, move)
+
+        while queue:
+            current = queue.popleft()
             
+            # Get list of neighbors - chỉ đi qua ô đã biết là đường (get_safe_neighbors)
+            neighbors = self.memory.get_safe_neighbors(current, map_state)
+
+            # --- TIE-BREAKING LOGIC: Prioritize unchanged direction ---
+            if current in parent:
+                _, prev_move = parent[current]
+                # Put direction matching previous direction at the start of traversal list
+                neighbors.sort(key=lambda x: x[1] != prev_move)
+
+            for next_pos, move in neighbors:
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    parent[next_pos] = (current, move)
+                    # early stop
+                    if next_pos == goal:
+                        return self._reconstruct_path(parent, start, goal)
+                    queue.append(next_pos)
+
+        return []
+    
+    def _get_capture_target(self, my_pos: tuple, enemy_pos: tuple, map_state: np.ndarray) -> tuple:
+        if self.capture_distance <= 1:
+            return enemy_pos
+ 
+        capture_zone = {enemy_pos}
+        queue = deque([(enemy_pos, 0)])
+        visited = {enemy_pos}
+ 
+        while queue:
+            pos, d = queue.popleft()
+            if d >= self.capture_distance:
+                continue
+            for nxt, _ in self._get_neighbors(pos, map_state):
+                if nxt not in visited:
+                    visited.add(nxt)
+                    capture_zone.add(nxt)
+                    queue.append((nxt, d + 1))
+ 
+        return min(capture_zone,
+                   key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1]))
+    
+    def predict_enemy_move(self, enemy_pos, my_pos, map_state, steps=2):
+        """Predict where Ghost will be after N steps."""
+        current = enemy_pos
+        for _ in range(steps):
+            best_move = Move.STAY
+            best_dist = -1
+            best_next = current  # Initialize for safety
+            for next_pos, move in self._get_neighbors(current, map_state):
+                dist = self.dist_map.get(next_pos, 0)
+                if dist > best_dist:
+                    best_dist = dist
+                    best_move = move
+                    best_next = next_pos
+            current = best_next if best_dist > -1 else current
+        return current
+
 
 class GhostAgent(BaseGhostAgent):
     """
