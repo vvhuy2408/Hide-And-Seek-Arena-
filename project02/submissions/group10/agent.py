@@ -72,112 +72,222 @@ class MemoryMap:
     
 class PacmanAgent(BasePacmanAgent):
     """
-    Example Pacman agent using a simple greedy strategy.
-    Students should implement their own search algorithms here.
+    Pacman (Seeker) Agent - Goal: Catch the Ghost
+    
+    Implement your search algorithm to find and catch the ghost.
+    Suggested algorithms: BFS, DFS, A*, Greedy Best-First
     """
     
     def __init__(self, **kwargs):
-        """
-        Initialize the Pacman agent.
-        Students can set up any data structures they need here.
-        """
         super().__init__(**kwargs)
-        self.name = "Example Greedy Pacman"
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        # Memory for limited observation mode
-        self.last_known_enemy_pos = None
+        self.memory = MemoryMap() # memory map for project 02
+        # path catching
+        self.current_path = []
+        self.last_enemy_pos = None
+        self.dist_map = {}
+        self.name = "BFS Pacman"
+
+    def _bfs_distance_map(self, start, map_state):
+        queue = deque([(start, 0)])
+        dist = {start: 0}
+
+        while queue:
+            pos, d = queue.popleft()
+            for nxt, _ in self._get_neighbors(pos, map_state):
+                if nxt not in dist:
+                    dist[nxt] = d + 1
+                    queue.append((nxt, d + 1))
+        
+        return dist
+
+    def bfs(self, start: tuple, goal: tuple, map_state: np.ndarray) -> list:
+        if start == goal:
+            return []
+        queue = deque([start])
+        visited = {start}
+        
+        # generate a parent map to store 
+        parent = {} # next_pos -> (current_pos, move)
+
+        while queue:
+            current = queue.popleft()
+            
+            # Get list of neighbors
+            neighbors = self._get_neighbors(current, map_state)
+
+            # --- TIE-BREAKING LOGIC: Prioritize unchanged direction ---
+            if current in parent:
+                _, prev_move = parent[current]
+                # Put direction matching previous direction at the start of traversal list
+                neighbors.sort(key=lambda x: x[1] != prev_move)
+
+            for next_pos, move in neighbors:
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    parent[next_pos] = (current, move)
+                    # early stop
+                    if next_pos == goal:
+                        return self._reconstruct_path(parent, start, goal)
+                    queue.append(next_pos)
+
+        return []
+    
+    def predict_enemy_move(self, enemy_pos, my_pos, map_state, steps=2):
+        """Predict where Ghost will be after N steps."""
+        current = enemy_pos
+        for _ in range(steps):
+            best_move = Move.STAY
+            best_dist = -1
+            for next_pos, move in self._get_neighbors(current, map_state):
+                dist = self.dist_map.get(next_pos, 0)
+                if dist > best_dist:
+                    best_dist = dist
+                    best_move = move
+                    best_next = next_pos
+            current = best_next if best_dist > -1 else current
+        return current
     
     def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
-             enemy_position: tuple,
-             step_number: int):
+         my_position: tuple, 
+         enemy_position: tuple,
+         step_number: int):
         """
-        Simple greedy strategy: move towards the ghost.
+        Decide the next move for Pacman (Seeker).
         
-        When enemy_position is None (limited observation mode),
-        uses last known position or explores randomly.
+        Strategy:
+            - Use BFS to find shortest path to Ghost
+            - Replan every step because Ghost always moves
+            - Move 2 steps if going straight, 1 step if turning
         
-        Students should implement better search algorithms like:
-        - BFS (Breadth-First Search)
-        - DFS (Depth-First Search)
-        - A* Search
-        - Greedy Best-First Search
-        - etc.
+        Args:
+            map_state: 2D numpy array where 1=wall, 0=empty
+            my_position: Pacman's current (row, col)
+            enemy_position: Ghost's current (row, col)
+            step_number: Current step number (starts at 1)
+            
+        Returns:
+            (Move, steps): Direction and number of steps to move
         """
-        # Update memory if enemy is visible
-        if enemy_position is not None:
-            self.last_known_enemy_pos = enemy_position
-        
-        # Use current sighting, fallback to last known, or explore
-        target = enemy_position or self.last_known_enemy_pos
-        
-        if target is None:
-            # No information about enemy - explore randomly
-            return self._explore(my_position, map_state)
-        
-        # Calculate direction to target (enemy or last known position)
-        row_diff = target[0] - my_position[0]
-        col_diff = target[1] - my_position[1]
-        
-        # List of possible moves in order of preference
-        moves = []
-        
-        # Prioritize vertical movement if needed
-        if row_diff > 0:
-            moves.append(Move.DOWN)
-        elif row_diff < 0:
-            moves.append(Move.UP)
-        
-        # Prioritize horizontal movement if needed
-        if col_diff > 0:
-            moves.append(Move.RIGHT)
-        elif col_diff < 0:
-            moves.append(Move.LEFT)
-        
-        # Try each move in order
-        for move in moves:
-            desired_steps = self._desired_steps(move, row_diff, col_diff)
-            steps = self._max_valid_steps(my_position, move, map_state, desired_steps)
-            if steps > 0:
-                return (move, steps)
-        
-        # If no preferred move is valid, try any valid move
-        all_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        random.shuffle(all_moves)
-        
-        for move in all_moves:
-            steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
-            if steps > 0:
-                return (move, steps)
-        
-        # If no move is valid, stay
-        return (Move.STAY, 1)
+        start_time = time.perf_counter()
+        bfs_time = 0
 
-    def _explore(self, my_position: tuple, map_state: np.ndarray):
-        """Random exploration when enemy position is unknown."""
-        all_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        random.shuffle(all_moves)
-        
-        for move in all_moves:
-            steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
-            if steps > 0:
-                return (move, steps)
-        
-        return (Move.STAY, 1)
+        # ------- DISTANCE MAP -------
+        self.dist_map = self._bfs_distance_map(enemy_position, map_state)
+
+        # ------- GET TARGET -------
+        dist_to_ghost = self.dist_map.get(enemy_position, float('inf'))
+                    
+        # If ghost is 2 steps away -> aim straight at ghost
+        if dist_to_ghost <= self.pacman_speed:
+            target_pos = enemy_position
+        else:
+            # ------- PREDICTIVE -------
+            # Predict ghost position, aim at predicted position
+            target_pos = self.predict_enemy_move(enemy_position, my_position, map_state)
+
+        # ------- REPLANNING -------
+        # Replan every step because Ghost always moves -> old path always becomes outdated
+        if not self.current_path or self.last_enemy_pos != enemy_position:
+            bfs_start = time.perf_counter()  # <- added
+            self.current_path = self.bfs(my_position, target_pos, map_state)
+            bfs_time = time.perf_counter() - bfs_start  # <- added
+            self.last_enemy_pos = enemy_position        
+        else:
+            bfs_time = 0
+
+        # ------- EDGE CASE: NO PATH -------
+        # Occurs when Ghost is completely isolated by walls
+        # -> stay still wait for max_steps, Ghost wins automatically
+        if not self.current_path or self.current_path == [Move.STAY]:
+            # Choose direction with most exits instead of staying still (Move.STAY)
+            best_fallback = Move.STAY
+            best_score = -1
+
+            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                next_p = self._apply_move(my_position, move)
+                if self._is_valid_position(next_p, map_state):
+                    # Heuristic avoid dead-end
+                    freedom = len(self._get_neighbors(next_p, map_state))
+                    ghost_dist = self.dist_map.get(next_p, 0)
+                    score = ghost_dist + 0.5 * freedom
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_fallback = move
+
+            result = (best_fallback, 1)
+
+        # ------- MULTI-STEP LOGIC -------
+        # Rule: go straight (same direction) -> 2 steps
+        #       turn (different direction) -> 1 step
+        else:
+            first_move = self.current_path.pop(0)
+            steps_to_move = 1
+
+            if self.current_path and self.pacman_speed >= 2:
+                second_move = self.current_path[0]
+                if second_move == first_move:
+                    actual_steps = self._max_valid_steps(my_position, first_move, map_state, 2)
+                    if actual_steps == 2:
+                        self.current_path.pop(0)
+                        steps_to_move = 2
+                
+            result = (first_move, steps_to_move)
+
+        # ------- BENCHMARK -------
+        total_time = time.perf_counter() - start_time
+        print(f"[Pacman] Step {step_number} | Total: {total_time:.6f}s | BFS: {bfs_time:.6f}s")
+
+        return result
+    
+    # Helper methods
     
     def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
+        """Return True if pos is inside the grid and not a wall."""
         row, col = pos
         height, width = map_state.shape
-        
         if row < 0 or row >= height or col < 0 or col >= width:
             return False
-        
         return map_state[row, col] == 0
+ 
+    def _apply_move(self, pos: tuple, move: Move) -> tuple:
+        """Return the new position after applying a move."""
+        delta_row, delta_col = move.value
+        return (pos[0] + delta_row, pos[1] + delta_col)
+ 
+    def _get_neighbors(self, pos: tuple, map_state: np.ndarray) -> list:
+        """Return list of (next_pos, move) for all valid moves from pos."""
+        # use inline to maximize performance
+        x, y = pos
+        rows, cols = map_state.shape
 
-    def _max_valid_steps(self, pos: tuple, move: Move, map_state: np.ndarray, desired_steps: int) -> int:
+        neighbors = []
+
+        if x > 0 and map_state[x-1][y] != 1:
+            neighbors.append(((x-1, y), Move.UP))
+
+        if x < rows-1 and map_state[x+1][y] != 1:
+            neighbors.append(((x+1, y), Move.DOWN))
+
+        if y > 0 and map_state[x][y-1] != 1:
+            neighbors.append(((x, y-1), Move.LEFT))
+
+        if y < cols-1 and map_state[x][y+1] != 1:
+            neighbors.append(((x, y+1), Move.RIGHT))
+
+        return neighbors
+    
+    def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
+        for move in moves:
+            max_steps = min(self.pacman_speed, max(1, desired_steps))
+            steps = self._max_valid_steps(pos, move, map_state, max_steps)
+            if steps > 0:
+                return (move, steps)
+        return None
+
+    def _max_valid_steps(self, pos: tuple, move: Move, map_state: np.ndarray, max_steps: int) -> int:
         steps = 0
-        max_steps = min(self.pacman_speed, max(1, desired_steps))
         current = pos
         for _ in range(max_steps):
             delta_row, delta_col = move.value
@@ -187,14 +297,20 @@ class PacmanAgent(BasePacmanAgent):
             steps += 1
             current = next_pos
         return steps
+    
+    def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
+        """Check if a move from pos is valid for at least one step."""
+        return self._max_valid_steps(pos, move, map_state, 1) == 1
+    
+    def _reconstruct_path(self, parent, start, goal):
+        path = []
+        cur = goal
 
-    def _desired_steps(self, move: Move, row_diff: int, col_diff: int) -> int:
-        if move in (Move.UP, Move.DOWN):
-            return abs(row_diff)
-        if move in (Move.LEFT, Move.RIGHT):
-            return abs(col_diff)
-        return 1
-           
+        while cur != start:
+            cur, move = parent[cur]
+            path.append(move)
+
+        return path[::-1]      
 
 class GhostAgent(BaseGhostAgent):
     """
