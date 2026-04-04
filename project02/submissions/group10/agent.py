@@ -154,6 +154,14 @@ class PacmanAgent(BasePacmanAgent):
         # ------- UPDATE MEMORY -------
         self.memory.update(map_state, my_position, enemy_position, step_number)
         
+        # ------- INSTANT CAPTURE -------
+        if enemy_position is not None:
+            dist = abs(enemy_position[0] - my_position[0]) + abs(enemy_position[1] - my_position[1])
+            if dist <= self.capture_distance:
+                for nxt, move in self.memory.get_safe_neighbors(my_position, map_state):
+                    if nxt == enemy_position:
+                        return (move, 1)
+            
         # ------- INIT LOCK (chỉ chạy 1 lần) -------
         if not hasattr(self, "locked_target"):
             self.locked_target = None
