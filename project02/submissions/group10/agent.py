@@ -42,11 +42,11 @@ class MemoryMap:
         self.unknown_frontier = set()  # biên giới chưa khám phá
 
     def update(self, map_state, my_pos, enemy_pos, step_number):
-        # Cập nhật bản đồ đã biết - OPTIMIZED: only scan 5x5 local area
+        # Cập nhật bản đồ đã biết
         rows, cols = map_state.shape
         newly_found = set()
         
-        # Only check 5x5 area around my_pos (MUCH faster than full scan)
+        # Only check 5x5 area around my_pos
         if map_state[my_pos[0], my_pos[1]] == 0:
             self.known_empty.add(my_pos)
         
@@ -116,6 +116,8 @@ class PacmanAgent(BasePacmanAgent):
         self.last_positions = []
 
     def step(self, map_state, my_position, enemy_position, step_number):
+        start_time = time.perf_counter()
+
         self.memory.update(map_state, my_position, enemy_position, step_number)
         self.visited.add(my_position)
 
@@ -124,7 +126,7 @@ class PacmanAgent(BasePacmanAgent):
         if len(self.last_positions) > 6:
             self.last_positions.pop(0)
 
-        is_looping = len(set(self.last_positions)) <= 2 
+        is_looping = len(set(self.last_positions)) <= 2
 
         # ---- TARGET ----
         if enemy_position is not None:
@@ -132,7 +134,7 @@ class PacmanAgent(BasePacmanAgent):
         elif self.memory.last_seen_enemy is not None:
             target = self.memory.last_seen_enemy
         else:
-            target = self.memory.get_exploration_target(my_position, map_state)        
+            target = self.memory.get_exploration_target(my_position, map_state)
 
         # ---- REPLAN ----
         if not self.current_path or is_looping:
@@ -157,13 +159,17 @@ class PacmanAgent(BasePacmanAgent):
 
         # ---- FALLBACK ----
         if not self.current_path:
-            return self._explore(my_position, map_state, True)
+            result = self._explore(my_position, map_state, True)
+            # print(f"[Pacman] Step {step_number} | FALLBACK | Time: {time.perf_counter() - start_time:.4f}s")
+            return result
 
         move = self.current_path.pop(0)
 
         steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
         if steps == 0:
-            return self._explore(my_position, map_state, True)
+            result = self._explore(my_position, map_state, True)
+            # print(f"[Pacman] Step {step_number} | BLOCKED | Time: {time.perf_counter() - start_time:.4f}s")
+            return result
 
         self.prev_move = move
 
@@ -179,7 +185,9 @@ class PacmanAgent(BasePacmanAgent):
 
         self.prev_move = move
 
-        return (move, max(1, steps))
+        result = (move, max(1, steps))
+        # print(f"[Pacman] Step {step_number} | target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - start_time:.4f}s")
+        return result
     
     def _bfs(self, start, goal, map_state):
         if start == goal:
@@ -375,10 +383,10 @@ class GhostAgent(BaseGhostAgent):
                 path = self.bfs(my_position, self.exploration_target, map_state)
                 if path and path[0] != Move.STAY:
                     total_time = time.perf_counter() - self.start_time
-                    print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target} | Time: {total_time:.4f}s")
+                    # print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target} | Time: {total_time:.4f}s")
                     return path[0]
 
-            # [FIX LỖI CRASH TẠI ĐÂY]: Nếu không tìm được đường tới target mà threat vẫn = None
+            # Nếu không tìm được đường tới target mà threat vẫn = None
             # Ta KHÔNG được chạy Minimax (vì không có vị trí Pacman). Thay vào đó, chọn hướng an toàn nhất.
             if threat is None:
                 best_fallback = Move.STAY
@@ -389,7 +397,7 @@ class GhostAgent(BaseGhostAgent):
                         best_deg = deg
                         best_fallback = move
                 total_time = time.perf_counter() - self.start_time
-                print(f"[Ghost] Step {step_number} | FALLBACK (no threat) | Time: {total_time:.4f}s")
+                # print(f"[Ghost] Step {step_number} | FALLBACK (no threat) | Time: {total_time:.4f}s")
                 return best_fallback
 
         # 4. KÍCH HOẠT MINIMAX (Khi nguy hiểm <= 8 bước)
@@ -412,7 +420,7 @@ class GhostAgent(BaseGhostAgent):
             depth += 1
 
         total_time = time.perf_counter() - self.start_time
-        print(f"[Ghost] Step {step_number} | EVADING Minimax Depth {depth-1} | Time: {total_time:.4f}s")
+        # print(f"[Ghost] Step {step_number} | EVADING Minimax Depth {depth-1} | Time: {total_time:.4f}s")
         return best_move
 
     def _find_best_fog_target(self, my_pos, threat_pos, map_state, g_dist, p_dist):
