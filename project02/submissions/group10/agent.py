@@ -378,7 +378,8 @@ class GhostAgent(BaseGhostAgent):
             if self.exploration_target:
                 path = self.bfs(my_position, self.exploration_target, map_state)
                 if path and path[0] != Move.STAY:
-                    print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target}")
+                    total_time = time.perf_counter() - self.start_time
+                    print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target} | Time: {total_time:.4f}s")
                     return path[0]
 
             # [FIX LỖI CRASH TẠI ĐÂY]: Nếu không tìm được đường tới target mà threat vẫn = None
@@ -391,6 +392,8 @@ class GhostAgent(BaseGhostAgent):
                     if deg > best_deg:
                         best_deg = deg
                         best_fallback = move
+                total_time = time.perf_counter() - self.start_time
+                print(f"[Ghost] Step {step_number} | FALLBACK (no threat) | Time: {total_time:.4f}s")
                 return best_fallback
 
         # 4. KÍCH HOẠT MINIMAX (Khi nguy hiểm <= 8 bước)
