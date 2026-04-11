@@ -131,20 +131,30 @@ class MemoryMap:
     
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
+        self.memory = MemoryMap()
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        self.memory = MemoryMap()
         self.name = "BFS + Memory Pacman + Predictive Pacman"
         self.current_path = []
         self.prev_move = None
         self.visited = set()
         self.last_positions = []
+        self.dist_map = {}
+        self.last_dist_source = None
+        self.last_map_hash = None
 
     def step(self, map_state, my_position, enemy_position, step_number):
-        start_time = time.perf_counter()
-
         self.memory.update(map_state, my_position, enemy_position, step_number)
+        start_time = time.perf_counter()
         self.visited.add(my_position)
+
+        # ---- CACHE dist_map ----
+        current_map_hash = hash(map_state.tobytes())
+
+        if self.last_dist_source != my_position or self.last_map_hash != current_map_hash:
+            self.dist_map = self._compute_dist_map(my_position, map_state)
+            self.last_dist_source = my_position
+            self.last_map_hash = current_map_hash
 
         # ---- LOOP DETECTION ----
         self.last_positions.append(my_position)
@@ -165,14 +175,14 @@ class PacmanAgent(BasePacmanAgent):
                 # lọc reachable để tránh BFS inf
                 candidates = [
                     p for p in candidates
-                    if self._bfs_dist(my_position, p, map_state) < float('inf')
+                    if self.dist_map.get(p, float('inf')) < float('inf')
                 ]
 
                 if candidates:
                     # chọn điểm gần nhất để intercept
                     target = min(
                         candidates,
-                        key=lambda p: self._bfs_dist(my_position, p, map_state)
+                        key=lambda p: self.dist_map.get(p, float('inf'))
                     )
                 else:
                     target = self.memory.last_seen_enemy
@@ -218,13 +228,34 @@ class PacmanAgent(BasePacmanAgent):
             next_pos = self._apply_move(my_position, move)
             next2 = self._apply_move(next_pos, move)
 
-            if self._is_valid_position(next_pos, map_state) and \
-            self._is_valid_position(next2, map_state):
-                steps = min(2, self.pacman_speed)
-                self.current_path.pop(0)
+            # bước 1 phải hợp lệ
+            if not self._is_valid_position(next_pos, map_state):
+                steps = 1
+            else:
+                # bước 2 phải nằm trong known_empty (an toàn tuyệt đối)
+                if next2 in self.memory.known_empty:
+                    steps = min(2, self.pacman_speed)
+                    self.current_path.pop(0)
+                else:
+                    steps = 1
 
         self.prev_move = move
         return (move, max(1, steps))
+    
+    def _compute_dist_map(self, start, map_state):
+        dist = {start: 0}
+        queue = deque([start])
+
+        while queue:
+            current = queue.popleft()
+            d = dist[current]
+
+            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
+                if next_pos not in dist:
+                    dist[next_pos] = d + 1
+                    queue.append(next_pos)
+
+        return dist
     
     # BFS distance (dùng cho predictive)
     def _bfs_dist(self, start, goal, map_state):
