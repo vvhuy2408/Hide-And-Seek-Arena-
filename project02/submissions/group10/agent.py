@@ -40,6 +40,10 @@ class MemoryMap:
         self.last_seen_enemy = None    # vị trí địch lần cuối thấy
         self.step_last_seen = 0        # bước nào thấy lần cuối
         self.unknown_frontier = set()  # biên giới chưa khám phá
+        
+        # Cache for Topology
+        self.topology_cache = {} # Save expensive calculations like static distances
+        self.fog_cache = {}      # Lưu mật độ sương mù theo bước
 
     def update(self, map_state, my_pos, enemy_pos, step_number):
         # Cập nhật bản đồ đã biết
@@ -67,7 +71,6 @@ class MemoryMap:
             self.step_last_seen = step_number
             
         # Cập nhật biên giới khám phá (neighbor của known_empty là unknown)
-        # self.unknown_frontier.clear()
         for pos in newly_found:
             x, y = pos
             for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)]:
@@ -75,6 +78,9 @@ class MemoryMap:
                 if 0 <= nx < rows and 0 <= ny < cols:
                     if map_state[nx][ny] == -1:  # ô chưa biết
                         self.unknown_frontier.add((nx, ny))
+                        
+        # Delete cache after increasing step to calculate fog_density more properly
+        self.fog_cache.clear()
             
     def get_safe_neighbors(self, pos, map_state):
         x, y = pos
@@ -91,43 +97,77 @@ class MemoryMap:
         return neighbors
     
     def get_exploration_target(self, my_pos, map_state):
-        """Tìm mục tiêu khám phá gần nhất trong unknown_frontier."""
+        """Priotitize areas have highest fog_density near frontier."""
         if not self.unknown_frontier:
-            # Nếu không có frontier, dùng BFS để tìm ô trống bất kỳ
             return my_pos
+            
+        best_target = None
+        max_score = -float('inf')
         
-        # Tìm ô unknown gần nhất bằng Manhattan distance
-        best_target = min(
-            self.unknown_frontier, 
-            key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
-        )
-        
-        return best_target
-
-    def estimate_enemy_pos(self, current_step):
+       # Limit check to a maximum of 10 frontier cells to save time
+        candidates = list(self.unknown_frontier)
+        if len(candidates) > 10:
+            candidates = random.sample(candidates, 10)
+            
+        for p in candidates:
+            dist = abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
+            # Score = Surroundings fog density / Distance
+            score = self.fog_density(p, 3, map_state) * 100 - dist
+            if score > max_score:
+                max_score = score
+                best_target = p
+                
+        return best_target or my_pos
+    
+    def estimate_enemy_pos(self, step_number, map_state):
+        """Predict potential enemy locations using BFS with an expanding radius."""
         if self.last_seen_enemy is None:
-            return []
-
-        dt = current_step - self.step_last_seen
-
-        # nếu vừa thấy → trả về vị trí chính xác
-        if dt <= 0:
-            return [self.last_seen_enemy]
-
-        x0, y0 = self.last_seen_enemy
-        candidates = set()
-
-        # vùng diamond theo Manhattan distance
-        for dx in range(-dt, dt + 1):
-            for dy in range(-dt, dt + 1):
-                if abs(dx) + abs(dy) <= dt:
-                    nx, ny = x0 + dx, y0 + dy
-
-                    # loại bỏ tường đã biết
+            return set()
+            
+        steps_passed = step_number - self.step_last_seen
+        # Assume ghost moves 1 cell/step and pacman moves at max_speed. Using a safety radius of steps_passed * 1.2
+        radius = int(steps_passed * 1.2) 
+        
+        possible_positions = {self.last_seen_enemy}
+        fringe = deque([(self.last_seen_enemy, 0)])
+        visited = {self.last_seen_enemy}
+        
+        while fringe:
+            pos, dist = fringe.popleft()
+            if dist >= radius: continue
+            
+            for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)]:
+                nx, ny = pos[0]+dx, pos[1]+dy
+                if (nx, ny) not in visited:
+                    # Skip known walls; cells marked as -1 or 0 are potential enemy positions
                     if (nx, ny) not in self.known_walls:
-                        candidates.add((nx, ny))
+                        visited.add((nx, ny))
+                        possible_positions.add((nx, ny))
+                        fringe.append(((nx, ny), dist + 1))
+        return possible_positions
+    
+    def fog_density(self, center, radius, map_state):
+        """Calculate the ratio of unknown cells (-1) within a given radius."""
+        cache_key = (center, radius)
+        if cache_key in self.fog_cache:
+            return self.fog_cache[cache_key]
 
-        return list(candidates)
+        r_min, r_max = max(0, center[0]-radius), min(map_state.shape[0], center[0]+radius+1)
+        c_min, c_max = max(0, center[1]-radius), min(map_state.shape[1], center[1]+radius+1)
+        
+        unknown_count = 0
+        total_walkable = 0
+        
+        for r in range(r_min, r_max):
+            for c in range(c_min, c_max):
+                if (r, c) in self.known_walls: continue
+                total_walkable += 1
+                if (r, c) not in self.known_empty:
+                    unknown_count += 1
+        
+        density = unknown_count / total_walkable if total_walkable > 0 else 0
+        self.fog_cache[cache_key] = density
+        return density
     
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
@@ -169,21 +209,26 @@ class PacmanAgent(BasePacmanAgent):
 
         # ---- PREDICT ----
         elif self.memory.last_seen_enemy is not None:
-            candidates = self.memory.estimate_enemy_pos(step_number)
-
-            if candidates:
-                # lọc reachable để tránh BFS inf
-                candidates = [
-                    p for p in candidates
+            # BFS-based prediction from MemoryMap (uses map_state for wall-aware expansion)
+            possible_area = self.memory.estimate_enemy_pos(step_number, map_state)
+            
+            if possible_area:
+                # Filter to reachable candidates using cached dist_map (from pacman branch)
+                reachable = [
+                    p for p in possible_area
                     if self.dist_map.get(p, float('inf')) < float('inf')
                 ]
-
-                if candidates:
-                    # chọn điểm gần nhất để intercept
-                    target = min(
-                        candidates,
-                        key=lambda p: self.dist_map.get(p, float('inf'))
-                    )
+                
+                if reachable:
+                    # Prioritize candidates in unknown frontier (fog-aware from main branch)
+                    frontier_candidates = [p for p in reachable if p in self.memory.unknown_frontier]
+                    
+                    if frontier_candidates:
+                        # Choose nearest frontier candidate using dist_map (efficient intercept)
+                        target = min(frontier_candidates, key=lambda p: self.dist_map.get(p, float('inf')))
+                    else:
+                        # All known area → choose closest reachable predicted position
+                        target = min(reachable, key=lambda p: self.dist_map.get(p, float('inf')))
                 else:
                     target = self.memory.last_seen_enemy
             else:
@@ -470,8 +515,6 @@ class GhostAgent(BaseGhostAgent):
             if self.exploration_target:
                 path = self.bfs(my_position, self.exploration_target, map_state)
                 if path and path[0] != Move.STAY:
-                    total_time = time.perf_counter() - self.start_time
-                    # print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target} | Time: {total_time:.4f}s")
                     return path[0]
 
             # Nếu không tìm được đường tới target mà threat vẫn = None
@@ -484,8 +527,6 @@ class GhostAgent(BaseGhostAgent):
                     if deg > best_deg:
                         best_deg = deg
                         best_fallback = move
-                total_time = time.perf_counter() - self.start_time
-                # print(f"[Ghost] Step {step_number} | FALLBACK (no threat) | Time: {total_time:.4f}s")
                 return best_fallback
 
         # 4. KÍCH HOẠT MINIMAX (Khi nguy hiểm <= 8 bước)
@@ -507,8 +548,6 @@ class GhostAgent(BaseGhostAgent):
 
             depth += 1
 
-        total_time = time.perf_counter() - self.start_time
-        # print(f"[Ghost] Step {step_number} | EVADING Minimax Depth {depth-1} | Time: {total_time:.4f}s")
         return best_move
 
     def _find_best_fog_target(self, my_pos, threat_pos, map_state, g_dist, p_dist):
@@ -638,7 +677,11 @@ class GhostAgent(BaseGhostAgent):
 
         maze_dist = p_root_dist.get(ghost_pos, 9999)
         score = (maze_dist * 100) + (manhattan * 10)
-        
+        # ghost prioritize the area that pacman haven't discovered yet
+        #using 3 as radius to ensure timing < 1s and local sensitivity
+        fog_bonus = self.memory.fog_density(ghost_pos, 3, map_state) * 1500
+        score += fog_bonus
+
         trap_depth = self.dead_ends.get(ghost_pos, 0)
         if trap_depth > 0:
             score -= (50000 - trap_depth * 100)
