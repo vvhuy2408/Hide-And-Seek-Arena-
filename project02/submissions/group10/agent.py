@@ -103,13 +103,38 @@ class MemoryMap:
         )
         
         return best_target
+
+    def estimate_enemy_pos(self, current_step):
+        if self.last_seen_enemy is None:
+            return []
+
+        dt = current_step - self.step_last_seen
+
+        # nếu vừa thấy → trả về vị trí chính xác
+        if dt <= 0:
+            return [self.last_seen_enemy]
+
+        x0, y0 = self.last_seen_enemy
+        candidates = set()
+
+        # vùng diamond theo Manhattan distance
+        for dx in range(-dt, dt + 1):
+            for dy in range(-dt, dt + 1):
+                if abs(dx) + abs(dy) <= dt:
+                    nx, ny = x0 + dx, y0 + dy
+
+                    # loại bỏ tường đã biết
+                    if (nx, ny) not in self.known_walls:
+                        candidates.add((nx, ny))
+
+        return list(candidates)
     
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
         self.memory = MemoryMap()
-        self.name = "BFS + Memory Pacman"
+        self.name = "BFS + Memory Pacman + Predictive Pacman"
         self.current_path = []
         self.prev_move = None
         self.visited = set()
@@ -131,8 +156,29 @@ class PacmanAgent(BasePacmanAgent):
         # ---- TARGET ----
         if enemy_position is not None:
             target = enemy_position
+
+        # ---- PREDICT ----
         elif self.memory.last_seen_enemy is not None:
-            target = self.memory.last_seen_enemy
+            candidates = self.memory.estimate_enemy_pos(step_number)
+
+            if candidates:
+                # lọc reachable để tránh BFS inf
+                candidates = [
+                    p for p in candidates
+                    if self._bfs_dist(my_position, p, map_state) < float('inf')
+                ]
+
+                if candidates:
+                    # chọn điểm gần nhất để intercept
+                    target = min(
+                        candidates,
+                        key=lambda p: self._bfs_dist(my_position, p, map_state)
+                    )
+                else:
+                    target = self.memory.last_seen_enemy
+            else:
+                target = self.memory.last_seen_enemy
+
         else:
             target = self.memory.get_exploration_target(my_position, map_state)
 
@@ -159,19 +205,13 @@ class PacmanAgent(BasePacmanAgent):
 
         # ---- FALLBACK ----
         if not self.current_path:
-            result = self._explore(my_position, map_state, True)
-            # print(f"[Pacman] Step {step_number} | FALLBACK | Time: {time.perf_counter() - start_time:.4f}s")
-            return result
+            return self._explore(my_position, map_state, True)
 
         move = self.current_path.pop(0)
 
         steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
         if steps == 0:
-            result = self._explore(my_position, map_state, True)
-            # print(f"[Pacman] Step {step_number} | BLOCKED | Time: {time.perf_counter() - start_time:.4f}s")
-            return result
-
-        self.prev_move = move
+            return self._explore(my_position, map_state, True)
 
         # multi step
         if self.current_path and self.current_path[0] == move:
@@ -184,10 +224,27 @@ class PacmanAgent(BasePacmanAgent):
                 self.current_path.pop(0)
 
         self.prev_move = move
+        return (move, max(1, steps))
+    
+    # BFS distance (dùng cho predictive)
+    def _bfs_dist(self, start, goal, map_state):
+        if start == goal:
+            return 0
 
-        result = (move, max(1, steps))
-        # print(f"[Pacman] Step {step_number} | target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - start_time:.4f}s")
-        return result
+        queue = deque([(start, 0)])
+        visited = {start}
+
+        while queue:
+            current, dist = queue.popleft()
+
+            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
+                if next_pos not in visited:
+                    if next_pos == goal:
+                        return dist + 1
+                    visited.add(next_pos)
+                    queue.append((next_pos, dist + 1))
+
+        return float('inf')
     
     def _bfs(self, start, goal, map_state):
         if start == goal:
