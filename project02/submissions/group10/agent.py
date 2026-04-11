@@ -71,7 +71,6 @@ class MemoryMap:
             self.step_last_seen = step_number
             
         # Cập nhật biên giới khám phá (neighbor của known_empty là unknown)
-        # self.unknown_frontier.clear()
         for pos in newly_found:
             x, y = pos
             for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)]:
@@ -126,7 +125,7 @@ class MemoryMap:
             return set()
             
         steps_passed = step_number - self.step_last_seen
-        # Assume ghost moves 1 cell/step and pacman moves at max_speed. Using a safety radius of steps_passed * 1.5
+        # Assume ghost moves 1 cell/step and pacman moves at max_speed. Using a safety radius of steps_passed * 1.2
         radius = int(steps_passed * 1.2) 
         
         possible_positions = {self.last_seen_enemy}
@@ -172,20 +171,30 @@ class MemoryMap:
     
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
+        self.memory = MemoryMap()
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        self.memory = MemoryMap()
-        self.name = "BFS + Memory Pacman"
+        self.name = "BFS + Memory Pacman + Predictive Pacman"
         self.current_path = []
         self.prev_move = None
         self.visited = set()
         self.last_positions = []
+        self.dist_map = {}
+        self.last_dist_source = None
+        self.last_map_hash = None
 
     def step(self, map_state, my_position, enemy_position, step_number):
-        start_time = time.perf_counter()
-
         self.memory.update(map_state, my_position, enemy_position, step_number)
+        start_time = time.perf_counter()
         self.visited.add(my_position)
+
+        # ---- CACHE dist_map ----
+        current_map_hash = hash(map_state.tobytes())
+
+        if self.last_dist_source != my_position or self.last_map_hash != current_map_hash:
+            self.dist_map = self._compute_dist_map(my_position, map_state)
+            self.last_dist_source = my_position
+            self.last_map_hash = current_map_hash
 
         # ---- LOOP DETECTION ----
         self.last_positions.append(my_position)
@@ -197,21 +206,34 @@ class PacmanAgent(BasePacmanAgent):
         # ---- TARGET ----
         if enemy_position is not None:
             target = enemy_position
+
+        # ---- PREDICT ----
         elif self.memory.last_seen_enemy is not None:
-            # finding the possible area
+            # BFS-based prediction from MemoryMap (uses map_state for wall-aware expansion)
             possible_area = self.memory.estimate_enemy_pos(step_number, map_state)
-            if possible_area: 
-                # finding the target inside the possible area that we haven't know yet (stay in unknown_frontier)
-                target_candidates = [p for p in possible_area if p in self.memory.unknown_frontier]
-                if target_candidates:
-                    # choose the one that near most
-                    target = target = min(target_candidates, key=lambda p: abs(p[0] - my_position[0]) + abs(p[1] - my_position[1]))
+            
+            if possible_area:
+                # Filter to reachable candidates using cached dist_map (from pacman branch)
+                reachable = [
+                    p for p in possible_area
+                    if self.dist_map.get(p, float('inf')) < float('inf')
+                ]
+                
+                if reachable:
+                    # Prioritize candidates in unknown frontier (fog-aware from main branch)
+                    frontier_candidates = [p for p in reachable if p in self.memory.unknown_frontier]
+                    
+                    if frontier_candidates:
+                        # Choose nearest frontier candidate using dist_map (efficient intercept)
+                        target = min(frontier_candidates, key=lambda p: self.dist_map.get(p, float('inf')))
+                    else:
+                        # All known area → choose closest reachable predicted position
+                        target = min(reachable, key=lambda p: self.dist_map.get(p, float('inf')))
                 else:
-                    # if we've known all the possible area -> go to the last seen pos
                     target = self.memory.last_seen_enemy
             else:
                 target = self.memory.last_seen_enemy
-                    
+
         else:
             target = self.memory.get_exploration_target(my_position, map_state)
 
@@ -238,35 +260,67 @@ class PacmanAgent(BasePacmanAgent):
 
         # ---- FALLBACK ----
         if not self.current_path:
-            result = self._explore(my_position, map_state, True)
-            # print(f"[Pacman] Step {step_number} | FALLBACK | Time: {time.perf_counter() - start_time:.4f}s")
-            return result
+            return self._explore(my_position, map_state, True)
 
         move = self.current_path.pop(0)
 
         steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
         if steps == 0:
-            result = self._explore(my_position, map_state, True)
-            # print(f"[Pacman] Step {step_number} | BLOCKED | Time: {time.perf_counter() - start_time:.4f}s")
-            return result
-
-        self.prev_move = move
+            return self._explore(my_position, map_state, True)
 
         # multi step
         if self.current_path and self.current_path[0] == move:
             next_pos = self._apply_move(my_position, move)
             next2 = self._apply_move(next_pos, move)
 
-            if self._is_valid_position(next_pos, map_state) and \
-            self._is_valid_position(next2, map_state):
-                steps = min(2, self.pacman_speed)
-                self.current_path.pop(0)
+            # bước 1 phải hợp lệ
+            if not self._is_valid_position(next_pos, map_state):
+                steps = 1
+            else:
+                # bước 2 phải nằm trong known_empty (an toàn tuyệt đối)
+                if next2 in self.memory.known_empty:
+                    steps = min(2, self.pacman_speed)
+                    self.current_path.pop(0)
+                else:
+                    steps = 1
 
         self.prev_move = move
+        return (move, max(1, steps))
+    
+    def _compute_dist_map(self, start, map_state):
+        dist = {start: 0}
+        queue = deque([start])
 
-        result = (move, max(1, steps))
-        # print(f"[Pacman] Step {step_number} | target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - start_time:.4f}s")
-        return result
+        while queue:
+            current = queue.popleft()
+            d = dist[current]
+
+            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
+                if next_pos not in dist:
+                    dist[next_pos] = d + 1
+                    queue.append(next_pos)
+
+        return dist
+    
+    # BFS distance (dùng cho predictive)
+    def _bfs_dist(self, start, goal, map_state):
+        if start == goal:
+            return 0
+
+        queue = deque([(start, 0)])
+        visited = {start}
+
+        while queue:
+            current, dist = queue.popleft()
+
+            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
+                if next_pos not in visited:
+                    if next_pos == goal:
+                        return dist + 1
+                    visited.add(next_pos)
+                    queue.append((next_pos, dist + 1))
+
+        return float('inf')
     
     def _bfs(self, start, goal, map_state):
         if start == goal:
@@ -461,8 +515,6 @@ class GhostAgent(BaseGhostAgent):
             if self.exploration_target:
                 path = self.bfs(my_position, self.exploration_target, map_state)
                 if path and path[0] != Move.STAY:
-                    total_time = time.perf_counter() - self.start_time
-                    # print(f"[Ghost] Step {step_number} | RELOCATING to Fog {self.exploration_target} | Time: {total_time:.4f}s")
                     return path[0]
 
             # Nếu không tìm được đường tới target mà threat vẫn = None
@@ -475,8 +527,6 @@ class GhostAgent(BaseGhostAgent):
                     if deg > best_deg:
                         best_deg = deg
                         best_fallback = move
-                total_time = time.perf_counter() - self.start_time
-                # print(f"[Ghost] Step {step_number} | FALLBACK (no threat) | Time: {total_time:.4f}s")
                 return best_fallback
 
         # 4. KÍCH HOẠT MINIMAX (Khi nguy hiểm <= 8 bước)
@@ -498,8 +548,6 @@ class GhostAgent(BaseGhostAgent):
 
             depth += 1
 
-        total_time = time.perf_counter() - self.start_time
-        # print(f"[Ghost] Step {step_number} | EVADING Minimax Depth {depth-1} | Time: {total_time:.4f}s")
         return best_move
 
     def _find_best_fog_target(self, my_pos, threat_pos, map_state, g_dist, p_dist):
