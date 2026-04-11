@@ -40,6 +40,10 @@ class MemoryMap:
         self.last_seen_enemy = None    # vị trí địch lần cuối thấy
         self.step_last_seen = 0        # bước nào thấy lần cuối
         self.unknown_frontier = set()  # biên giới chưa khám phá
+        
+        # Cache for Topology
+        self.topology_cache = {} # Save expensive calculations like static distances
+        self.fog_cache = {}      # Lưu mật độ sương mù theo bước
 
     def update(self, map_state, my_pos, enemy_pos, step_number):
         # Cập nhật bản đồ đã biết
@@ -75,6 +79,9 @@ class MemoryMap:
                 if 0 <= nx < rows and 0 <= ny < cols:
                     if map_state[nx][ny] == -1:  # ô chưa biết
                         self.unknown_frontier.add((nx, ny))
+                        
+        # Delete cache after increasing step to calculate fog_density more properly
+        self.fog_cache.clear()
             
     def get_safe_neighbors(self, pos, map_state):
         x, y = pos
@@ -91,18 +98,77 @@ class MemoryMap:
         return neighbors
     
     def get_exploration_target(self, my_pos, map_state):
-        """Tìm mục tiêu khám phá gần nhất trong unknown_frontier."""
+        """Priotitize areas have highest fog_density near frontier."""
         if not self.unknown_frontier:
-            # Nếu không có frontier, dùng BFS để tìm ô trống bất kỳ
             return my_pos
+            
+        best_target = None
+        max_score = -float('inf')
         
-        # Tìm ô unknown gần nhất bằng Manhattan distance
-        best_target = min(
-            self.unknown_frontier, 
-            key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
-        )
+       # Limit check to a maximum of 10 frontier cells to save time
+        candidates = list(self.unknown_frontier)
+        if len(candidates) > 10:
+            candidates = random.sample(candidates, 10)
+            
+        for p in candidates:
+            dist = abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
+            # Score = Surroundings fog density / Distance
+            score = self.fog_density(p, 3, map_state) * 100 - dist
+            if score > max_score:
+                max_score = score
+                best_target = p
+                
+        return best_target or my_pos
+    
+    def estimate_enemy_pos(self, step_number, map_state):
+        """Predict potential enemy locations using BFS with an expanding radius."""
+        if self.last_seen_enemy is None:
+            return set()
+            
+        steps_passed = step_number - self.step_last_seen
+        # Assume ghost moves 1 cell/step and pacman moves at max_speed. Using a safety radius of steps_passed * 1.5
+        radius = int(steps_passed * 1.2) 
         
-        return best_target
+        possible_positions = {self.last_seen_enemy}
+        fringe = deque([(self.last_seen_enemy, 0)])
+        visited = {self.last_seen_enemy}
+        
+        while fringe:
+            pos, dist = fringe.popleft()
+            if dist >= radius: continue
+            
+            for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)]:
+                nx, ny = pos[0]+dx, pos[1]+dy
+                if (nx, ny) not in visited:
+                    # Skip known walls; cells marked as -1 or 0 are potential enemy positions
+                    if (nx, ny) not in self.known_walls:
+                        visited.add((nx, ny))
+                        possible_positions.add((nx, ny))
+                        fringe.append(((nx, ny), dist + 1))
+        return possible_positions
+    
+    def fog_density(self, center, radius, map_state):
+        """Calculate the ratio of unknown cells (-1) within a given radius."""
+        cache_key = (center, radius)
+        if cache_key in self.fog_cache:
+            return self.fog_cache[cache_key]
+
+        r_min, r_max = max(0, center[0]-radius), min(map_state.shape[0], center[0]+radius+1)
+        c_min, c_max = max(0, center[1]-radius), min(map_state.shape[1], center[1]+radius+1)
+        
+        unknown_count = 0
+        total_walkable = 0
+        
+        for r in range(r_min, r_max):
+            for c in range(c_min, c_max):
+                if (r, c) in self.known_walls: continue
+                total_walkable += 1
+                if (r, c) not in self.known_empty:
+                    unknown_count += 1
+        
+        density = unknown_count / total_walkable if total_walkable > 0 else 0
+        self.fog_cache[cache_key] = density
+        return density
     
 class PacmanAgent(BasePacmanAgent):
     def __init__(self, **kwargs):
@@ -132,7 +198,20 @@ class PacmanAgent(BasePacmanAgent):
         if enemy_position is not None:
             target = enemy_position
         elif self.memory.last_seen_enemy is not None:
-            target = self.memory.last_seen_enemy
+            # finding the possible area
+            possible_area = self.memory.estimate_enemy_pos(step_number, map_state)
+            if possible_area: 
+                # finding the target inside the possible area that we haven't know yet (stay in unknown_frontier)
+                target_candidates = [p for p in possible_area if p in self.memory.unknown_frontier]
+                if target_candidates:
+                    # choose the one that near most
+                    target = target = min(target_candidates, key=lambda p: abs(p[0] - my_position[0]) + abs(p[1] - my_position[1]))
+                else:
+                    # if we've known all the possible area -> go to the last seen pos
+                    target = self.memory.last_seen_enemy
+            else:
+                target = self.memory.last_seen_enemy
+                    
         else:
             target = self.memory.get_exploration_target(my_position, map_state)
 
@@ -550,7 +629,11 @@ class GhostAgent(BaseGhostAgent):
 
         maze_dist = p_root_dist.get(ghost_pos, 9999)
         score = (maze_dist * 100) + (manhattan * 10)
-        
+        # ghost prioritize the area that pacman haven't discovered yet
+        #using 3 as radius to ensure timing < 1s and local sensitivity
+        fog_bonus = self.memory.fog_density(ghost_pos, 3, map_state) * 1500
+        score += fog_bonus
+
         trap_depth = self.dead_ends.get(ghost_pos, 0)
         if trap_depth > 0:
             score -= (50000 - trap_depth * 100)
