@@ -211,29 +211,25 @@ class PacmanAgent(BasePacmanAgent):
         # ---- PREDICT ----
         elif self.memory.last_seen_enemy is not None:
             # BFS-based prediction from MemoryMap (uses map_state for wall-aware expansion)
-            possible_area = self.memory.estimate_enemy_pos(step_number, map_state)
-            
-            if possible_area:
-                # Filter to reachable candidates using cached dist_map (from pacman branch)
-                reachable = [
-                    p for p in possible_area
-                    if self.dist_map.get(p, float('inf')) < float('inf')
-                ]
-                
-                if reachable:
-                    # Prioritize candidates in unknown frontier (fog-aware from main branch)
-                    frontier_candidates = [p for p in reachable if p in self.memory.unknown_frontier]
-                    
-                    if frontier_candidates:
-                        # Choose nearest frontier candidate using dist_map (efficient intercept)
-                        target = min(frontier_candidates, key=lambda p: self.dist_map.get(p, float('inf')))
-                    else:
-                        # All known area → choose closest reachable predicted position
-                        target = min(reachable, key=lambda p: self.dist_map.get(p, float('inf')))
-                else:
-                    target = self.memory.last_seen_enemy
+            ghost_start = self.memory.last_seen_enemy
+
+            ghost_path = self._predict_ghost_path(ghost_start, map_state, steps=4)
+
+            intercept_points = []
+
+            for t, pos in enumerate(ghost_path, start=1):
+                pacman_dist = self.dist_map.get(pos, float('inf'))
+                # intercept condition
+                if pacman_dist <= t * self.pacman_speed:
+                    score = pacman_dist - t  # càng nhỏ càng tốt
+                    intercept_points.append((pos, score))
+
+            if intercept_points:
+                # chọn điểm chặn tốt nhất
+                target = min(intercept_points, key=lambda x: x[1])[0]
             else:
-                target = self.memory.last_seen_enemy
+                # fallback: chặn điểm cuối
+                target = ghost_path[-1]
 
         else:
             target = self.memory.get_exploration_target(my_position, map_state)
@@ -243,18 +239,7 @@ class PacmanAgent(BasePacmanAgent):
             path = self._bfs(my_position, target, map_state)
 
             if not path:
-                if target == self.memory.last_seen_enemy:
-                    frontier_candidates = list(self.memory.unknown_frontier)
-                    if frontier_candidates:
-                        frontier_target = min(
-                            frontier_candidates,
-                            key=lambda p: abs(p[0] - target[0]) + abs(p[1] - target[1])
-                        )
-                    else:
-                        frontier_target = self._bfs_to_frontier(my_position, map_state)
-                else:
-                    frontier_target = self._bfs_to_frontier(my_position, map_state)
-
+                frontier_target = self._bfs_to_frontier(my_position, map_state)
                 path = self._bfs(my_position, frontier_target, map_state)
 
             self.current_path = path
@@ -287,6 +272,48 @@ class PacmanAgent(BasePacmanAgent):
 
         self.prev_move = move
         return (move, max(1, steps))
+    
+    def _predict_ghost_move(self, ghost_pos, map_state):
+        neighbors = []
+
+        for (dx, dy), move in [
+            ((-1,0), Move.UP), ((1,0), Move.DOWN),
+            ((0,-1), Move.LEFT), ((0,1), Move.RIGHT)
+        ]:
+            nx, ny = ghost_pos[0] + dx, ghost_pos[1] + dy
+            if self._is_valid_position((nx, ny), map_state):
+                neighbors.append(((nx, ny), move))
+
+        if not neighbors:
+            return ghost_pos
+
+        best_score = -float('inf')
+        best_pos = ghost_pos
+
+        for pos, _ in neighbors:
+            dist = self.dist_map.get(pos, 9999)
+            fog = self.memory.fog_density(pos, 2, map_state)
+            deg = len(self.memory.get_safe_neighbors(pos, map_state))
+
+            score = dist * 10 + fog * 50 + deg * 5
+
+            if score > best_score:
+                best_score = score
+                best_pos = pos
+
+        return best_pos
+    
+    def _predict_ghost_path(self, start_pos, map_state, steps=4):
+        """Rollout ghost policy nhiều bước."""
+        path = []
+        current = start_pos
+
+        for _ in range(steps):
+            nxt = self._predict_ghost_move(current, map_state)
+            path.append(nxt)
+            current = nxt
+
+        return path
     
     def _compute_dist_map(self, start, map_state):
         dist = {start: 0}
