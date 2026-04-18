@@ -1,4 +1,4 @@
-"""
+﻿"""
 Template for student agent implementation.
 
 INSTRUCTIONS:
@@ -271,7 +271,6 @@ class PacmanAgent(BasePacmanAgent):
                     steps = 1
 
         self.prev_move = move
-        print(f"[Pacman] Step {step_number} | target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - start_time:.4f}s")
         return (move, max(1, steps))
     
     def _predict_ghost_move(self, ghost_pos, map_state):
@@ -478,21 +477,15 @@ class PacmanAgent(BasePacmanAgent):
         return steps
 
 
-
 class GhostAgent(BaseGhostAgent):
     """
-    Ghost (Hider) Agent - Phantom v11 (Optimized + Particle Filter)
-    Improvements over v10:
-    - Lightweight Particle Filter (30 particles) for Pacman estimation
-    - Cached BFS for Voronoi computation
-    - Anti-leapfrog defense
-    - Tuned fog exploitation weights
-    - Time-bounded computation
+    Ghost (Hider) Agent - Phantom v10 (Final Optimization Edition)
+    Combines Voronoi Territory Control (active threat) with Pure Topology Escape (preventive).
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.name = "Phantom v11"
+        self.name = "Phantom v10"
         self.pacman_speed = kwargs.get('pacman_speed', 2)
         self.learned_map = None
         self.dead_ends = {}
@@ -501,18 +494,8 @@ class GhostAgent(BaseGhostAgent):
         self.prev_pos = []
         self.last_seen_pac = None
         self.last_seen_step = 0
-        # Particle Filter
-        self.particles = []
-        self.N_PARTICLES = 30
 
     def step(self, map_state, my_position, enemy_position, step_number):
-        t0 = time.perf_counter()
-        move = self._step_internal(map_state, my_position, enemy_position, step_number, t0)
-        threat_pos = enemy_position if enemy_position is not None else self.last_seen_pac
-        print(f"[Ghost ] Step {step_number:3d} | threat={threat_pos} | move={move.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
-        return move
-
-    def _step_internal(self, map_state, my_position, enemy_position, step_number, t0):
         if self.learned_map is None:
             self.learned_map = np.copy(map_state)
         else:
@@ -532,58 +515,25 @@ class GhostAgent(BaseGhostAgent):
             self._build_topology()
             self._topo_hash = th
 
-        # Particle Filter update
-        self._update_particles(enemy_position, my_position, map_state)
-
         moves = self._legal(my_position, map_state)
-        if not moves:
-            return Move.STAY
-        if len(moves) == 1:
-            return moves[0][1]
+        if not moves: return Move.STAY
+        if len(moves) == 1: return moves[0][1]
 
-        # OPENING BOOK: escape ghost house area (rows 7-12 are dangerous corridors)
-        in_ghost_house = 7 <= my_position[0] <= 12 and 5 <= my_position[1] <= 15
-        pac_ref = enemy_position if enemy_position is not None else self.last_seen_pac
-        if pac_ref is not None and (step_number <= 5 or (in_ghost_house and step_number <= 12)):
-            best_opening = self._opening_escape(my_position, map_state, moves, pac_ref)
-            if best_opening is not None:
-                return best_opening
-
-        # Determine threat position
-        if enemy_position is not None:
-            threat = enemy_position
-        else:
-            threat = self._get_threat_estimate(step_number)
+        # Process threat memory
+        threat = enemy_position
+        if threat is None and self.last_seen_pac is not None:
+            if step_number - self.last_seen_step <= 15: 
+                threat = self.last_seen_pac
 
         pac_bfs = self._bfs(threat, map_state) if threat else {}
         my_dist = pac_bfs.get(my_position, 999)
 
-        # Pre-compute ghost BFS for all candidate positions (cached)
-        all_candidates = list(set([my_position] + [nxt for nxt, _ in moves]))
-        gbfs_cache = {}
-        for pos in all_candidates:
-            if time.perf_counter() - t0 > 0.6:
-                break
-            gbfs_cache[pos] = self._bfs(pos, map_state)
-
-        # EMERGENCY MODE: when very close, use fast max-distance logic
-        if threat and my_dist <= 3:
-            return self._emergency_escape(my_position, moves, map_state, threat, pac_bfs)
-
         scores = []
-        stay_sc = self._score(my_position, Move.STAY, threat, pac_bfs,
-                              gbfs_cache.get(my_position), map_state,
-                              my_dist, True, my_position, t0)
+        stay_sc = self._score(my_position, Move.STAY, threat, pac_bfs, map_state, my_dist, True, my_position)
         scores.append((stay_sc, Move.STAY))
 
         for nxt, mv in moves:
-            if time.perf_counter() - t0 > 0.8:
-                d = pac_bfs.get(nxt, 50)
-                scores.append((d * 100, mv))
-                continue
-            sc = self._score(nxt, mv, threat, pac_bfs,
-                            gbfs_cache.get(nxt), map_state,
-                            my_dist, False, my_position, t0)
+            sc = self._score(nxt, mv, threat, pac_bfs, map_state, my_dist, False, my_position)
             scores.append((sc, mv))
 
         scores.sort(key=lambda x: x[0], reverse=True)
@@ -591,234 +541,61 @@ class GhostAgent(BaseGhostAgent):
 
         if best_sc <= -999000:
             best_mv = self._desperate_escape(my_position, moves, map_state, threat)
-
+        
         return best_mv
 
-    def _emergency_escape(self, my_pos, moves, ms, pac, pac_bfs):
-        """Fast escape when Ghost is critically close to Pacman (dist<=3)."""
-        best_mv = moves[0][1] if moves else Move.STAY
-        best_score = -float('inf')
-        rand = {mv: random.uniform(0, 100) for _, mv in moves}
-        for nxt, mv in moves:
-            d = pac_bfs.get(nxt, 50)
-            score = d * 300  # Maximize BFS distance
-            # Multi-step lookahead: how many cells reachable in 5 steps?
-            reach, exits = self._escape_plan(nxt, ms, 5)
-            score += reach * 50 + exits * 100
-            # LoS breaking is critical
-            if self._los(nxt, pac, ms):
-                score -= 20000
-            else:
-                score += 5000
-            # Dead-end is death
-            depth = self.dead_ends.get(nxt, 0)
-            if depth > 0:
-                score -= depth * 5000
-            # Prefer intersections
-            if nxt in self.intersections:
-                score += 3000
-            # Wall-hugging
-            score += self._wall_neighbors(nxt, ms) * 100
-            # Anti-loop (stronger in emergency)
-            score -= self.prev_pos[-8:].count(nxt) * 2000
-            # Fog bonus
-            if ms[nxt[0], nxt[1]] == -1:
-                score += 1500
-            # Randomness
-            score += rand[mv]
-            if score > best_score:
-                best_score = score
-                best_mv = mv
-        return best_mv
-
-    # ------------------------------------------------------------------
-    # OPENING BOOK
-    # ------------------------------------------------------------------
-    def _opening_escape(self, my_pos, map_state, moves, pac_ref=None):
-        """Escape phase: break alignment with Pacman position, flee to safety."""
-        if pac_ref is None:
-            return None  # No Pacman info → skip opening
-        pac_spawn = pac_ref
-
-        # Add controlled randomness for unpredictability
-        rand_bonus = {mv: random.uniform(0, 150) for _, mv in moves}
-
-        best_mv = None
-        best_score = -float('inf')
-        for nxt, mv in moves:
-            # BFS distance from Pacman spawn to candidate position
-            d = abs(nxt[0] - pac_spawn[0]) + abs(nxt[1] - pac_spawn[1])
-            exits = len(self._legal(nxt, map_state))
-            depth = self.dead_ends.get(nxt, 0)
-
-            score = d * 80 + exits * 50
-
-            # CRITICAL: Must break LoS and column/row alignment
-            same_col = (nxt[1] == pac_spawn[1])
-            same_row = (nxt[0] == pac_spawn[0])
-            in_los = self._los(nxt, pac_spawn, map_state)
-
-            if in_los:
-                score -= 5000  # NEVER stay in line of sight
-            if same_col:
-                score -= 3000  # Break column alignment urgently
-            if same_row:
-                score -= 1500
-
-            # Reward moves that go lateral (LEFT/RIGHT) when on same column
-            if my_pos[1] == pac_spawn[1]:  # Currently on same column
-                if mv in (Move.LEFT, Move.RIGHT):
-                    score += 3000  # Strongly prefer lateral escape
-
-            # Dead-end avoidance
-            if depth > 0:
-                score -= depth * 800
-
-            # Prefer intersections
-            if nxt in self.intersections:
-                score += 600
-
-            # Avoid long corridors
-            stretch = self._open_stretch(nxt, map_state)
-            if stretch >= 4:
-                score -= stretch * 50
-
-            # Randomness for unpredictability
-            score += rand_bonus[mv]
-
-            if score > best_score:
-                best_score = score
-                best_mv = mv
-        return best_mv
-
-    # ------------------------------------------------------------------
-    # PARTICLE FILTER
-    # ------------------------------------------------------------------
-    def _update_particles(self, enemy_position, my_position, map_state):
-        h, w = map_state.shape
-        if enemy_position is not None:
-            self.particles = [enemy_position] * self.N_PARTICLES
-            return
-        if not self.particles:
-            candidates = []
-            for r in range(h):
-                for c in range(w):
-                    if map_state[r, c] != 1:
-                        candidates.append((r, c))
-            if candidates:
-                self.particles = [random.choice(candidates)
-                                  for _ in range(self.N_PARTICLES)]
-            return
-
-        new_particles = []
-        for pos in self.particles:
-            legal = self._legal(pos, map_state)
-            if not legal:
-                new_particles.append(pos)
-                continue
-            if random.random() < 0.7 and my_position:
-                best_pos = pos
-                best_d = abs(pos[0] - my_position[0]) + abs(pos[1] - my_position[1])
-                for nxt, mv in legal:
-                    d = abs(nxt[0] - my_position[0]) + abs(nxt[1] - my_position[1])
-                    if d < best_d:
-                        best_d, best_pos = d, nxt
-                    # Pacman speed-2: check 2nd step in same direction
-                    nxt2 = (nxt[0] + mv.value[0], nxt[1] + mv.value[1])
-                    if (0 <= nxt2[0] < h and 0 <= nxt2[1] < w
-                            and map_state[nxt2[0], nxt2[1]] != 1):
-                        d2 = abs(nxt2[0] - my_position[0]) + abs(nxt2[1] - my_position[1])
-                        if d2 < best_d:
-                            best_d, best_pos = d2, nxt2
-                pos = best_pos
-            else:
-                pos = random.choice(legal)[0]
-            # Reject particles in visible cells (Pacman would be seen there)
-            if (0 <= pos[0] < h and 0 <= pos[1] < w
-                    and map_state[pos[0], pos[1]] != -1):
-                pos = random.choice(self.particles)
-            new_particles.append(pos)
-        self.particles = new_particles
-
-    def _get_threat_estimate(self, step_number):
-        """Best estimate of Pacman position from particles or memory."""
-        if self.particles:
-            counts = {}
-            for p in self.particles:
-                counts[p] = counts.get(p, 0) + 1
-            return max(counts, key=counts.get)
-        if self.last_seen_pac is not None:
-            max_age = max(20, int(15 * self.pacman_speed))
-            if step_number - self.last_seen_step <= max_age:
-                return self.last_seen_pac
-        return None
-
-    # ------------------------------------------------------------------
-    # SCORING
-    # ------------------------------------------------------------------
-    def _score(self, nxt, move_dir, pac, pbfs, gbfs, ms, current_dist,
-               is_stay, my_pos, t0):
+    def _score(self, nxt, move_dir, pac, pbfs, ms, current_dist, is_stay, my_pos):
         s = 0.0
         dist = pbfs.get(nxt, 50)
         turns_to_pac = dist / max(1, self.pacman_speed)
 
-        # M1: TOPOLOGY ESCAPE
+        # ---------------------------------------------------------
+        # METRIC 1: PURE TOPOLOGY ESCAPE (PROTECTION WHEN PACMAN IS UNSEEN)
+        # ---------------------------------------------------------
         reach, exits = self._escape_plan(nxt, ms, 5)
         s += reach * 15 + exits * 40
         if exits == 0 and turns_to_pac < 15:
-            s -= 10000
+            s -= 10000  # Never walk into a fully enclosed 5-depth pocket
 
-        # M2: VORONOI TERRITORY (uses cached gbfs)
-        if gbfs is not None and time.perf_counter() - t0 < 0.7:
-            territory, vor_exits = self._voronoi_territory(
-                nxt, pac, pbfs, ms, gbfs)
-        else:
-            territory, vor_exits = 200, 0
+        # ---------------------------------------------------------
+        # METRIC 2: DOMAIN CONTROL (VORONOI TERRITORY)
+        # ---------------------------------------------------------
+        territory, _ = self._voronoi_territory(nxt, pac, pbfs, ms)
         if pac and territory < 20:
-            s -= (40 - territory) * 800
-        s += territory * 60
+            s -= (40 - territory) * 800  # Massive penalty for trap risk
+        s += territory * 60            # Reward space ownership
 
-        # M3: DISTANCE FROM PACMAN (tuned for capture_distance=2, speed=2)
-        s += turns_to_pac * 200
-        if dist < current_dist and current_dist <= 25:
-            s -= 8000
-        elif dist > current_dist:
-            s += 800
-        # Graduated panic: the closer, the worse
-        if pac:
-            if turns_to_pac < 1.0:
-                return -999999  # Immediate death
-            elif turns_to_pac < 1.5:
-                s -= 50000  # Critical danger
-            elif turns_to_pac < 2.5:
-                s -= 15000  # High danger
-            elif turns_to_pac < 4.0:
-                s -= 3000   # Elevated danger
+        # ---------------------------------------------------------
+        # METRIC 3: DISTANCE FROM PACMAN
+        # ---------------------------------------------------------
+        s += turns_to_pac * 150
+        if dist < current_dist and current_dist <= 25: s -= 6000
+        elif dist > current_dist: s += 500
+        if pac and turns_to_pac < 1.5: return -999999
 
-        # M4: DEAD-END RISK
+        # ---------------------------------------------------------
+        # METRIC 4: DEAD END RISK
+        # ---------------------------------------------------------
         depth = self.dead_ends.get(nxt, 0)
         if depth > 0:
-            if turns_to_pac < 8:
-                s -= (depth ** 2) * 1200
-            else:
-                s -= depth * 150
+            if turns_to_pac < 8: s -= (depth ** 2) * 1200
+            else: s -= depth * 150
 
-        # M5: LINE OF SIGHT BREAKING (strengthened)
+        # ---------------------------------------------------------
+        # METRIC 5: LINE OF SIGHT BREAKING
+        # ---------------------------------------------------------
         if pac and self._los(nxt, pac, ms):
             los_dist = abs(nxt[0] - pac[0]) + abs(nxt[1] - pac[1])
             los_turns = los_dist / max(1, self.pacman_speed)
-            if los_turns <= 1:
-                s -= 25000  # Almost certain death
-            elif los_turns <= 2:
-                s -= 12000  # Very dangerous
-            elif los_turns <= 3:
-                s -= 5000
-            else:
-                s -= 1500
+            if los_turns <= 1: s -= 9000
+            elif los_turns <= 2: s -= 5000
+            else: s -= 1500
         elif pac:
-            s += 2000  # Strong reward for hiding
+            s += 1200  # Extremely high incentive to stay out of LoS
 
-        # M6: ORTHOGONAL JUKING
+        # ---------------------------------------------------------
+        # METRIC 6: UNPREDICTABILITY (ORTHOGONAL JUKING)
+        # ---------------------------------------------------------
         if pac and not is_stay:
             vx = nxt[0] - pac[0]
             vy = nxt[1] - pac[1]
@@ -827,106 +604,45 @@ class GhostAgent(BaseGhostAgent):
             dot = (vx * mx) + (vy * my)
             if dot == 0:
                 s += 600
-                if self._wall_neighbors(nxt, ms) >= 2:
-                    s += 300
+                if self._wall_neighbors(nxt, ms) >= 2: s += 300 
 
-        # M7: FOG DENSITY & SPRINT CORRIDORS (Tuned weights)
+        # ---------------------------------------------------------
+        # METRIC 7: FOG DENSITY & SPRINT CORRIDORS
+        # ---------------------------------------------------------
         fog = self._fog7(nxt, ms)
-        if is_stay:
-            s += fog * (40 if turns_to_pac > 10 else 5)
-        else:
-            s += fog * 25  # Increased from 15 to encourage active fog-seeking
-        if ms[nxt[0], nxt[1]] == -1:
-            s += 200
+        s += fog * (40 if is_stay else 15)  # Severely reduced fog chasing when moving
+        if ms[nxt[0], nxt[1]] == -1: s += 200
 
         open_stretch = self._open_stretch(nxt, ms)
         wall_count = self._wall_neighbors(nxt, ms)
-
-        if open_stretch >= 4:
-            s -= open_stretch * 60
-        s += wall_count * 20
-
+        
+        if open_stretch >= 4: s -= open_stretch * 60
+        s += wall_count * 20  # Reduced: stop hugging corners purely for wall count
+        
         if nxt in self.intersections:
             s += 200
-            if turns_to_pac < 8:
-                s += 400
+            if turns_to_pac < 8: s += 400
 
-        # M8: ANTI-LOOP
+        # ---------------------------------------------------------
+        # METRIC 8: ANTI-LOOP
+        # ---------------------------------------------------------
         if not is_stay:
             s -= self.prev_pos[-6:].count(nxt) * 500
 
-        # M9: DYNAMIC STAY DECISION
+        # ---------------------------------------------------------
+        # METRIC 9: DYNAMIC DECISION MODE
+        # ---------------------------------------------------------
         if is_stay:
             s -= 1000
-            recent_stays = sum(1 for i in range(1, len(self.prev_pos))
-                               if self.prev_pos[i] == self.prev_pos[i - 1])
+            recent_stays = sum(1 for i in range(1, len(self.prev_pos)) if self.prev_pos[i] == self.prev_pos[i-1])
             if recent_stays >= 3:
-                s -= 80000
-            if (fog >= 12 and depth == 0 and turns_to_pac > 10
-                    and open_stretch <= 2 and exits > 0):
-                s += 2500
+                s -= 80000 
+            if fog >= 12 and depth == 0 and turns_to_pac > 10 and open_stretch <= 2 and exits > 0:
+                s += 2500  
             else:
-                s -= 40000
-
-        # M10: ANTI-LEAPFROG DEFENSE (NEW)
-        if pac and not is_stay:
-            if self._leapfrog_risk(nxt, pac, ms):
-                s -= 8000
+                s -= 40000 
 
         return s
-
-    # ------------------------------------------------------------------
-    # ANTI-LEAPFROG
-    # ------------------------------------------------------------------
-    def _leapfrog_risk(self, ghost_pos, pac_pos, ms):
-        """Detect if Pacman can jump past Ghost in a straight corridor."""
-        if pac_pos is None:
-            return False
-        dr = ghost_pos[0] - pac_pos[0]
-        dc = ghost_pos[1] - pac_pos[1]
-        total = abs(dr) + abs(dc)
-        # Only same axis and within leapfrog range
-        if dr != 0 and dc != 0:
-            return False
-        if total > self.pacman_speed + 1 or total == 0:
-            return False
-        if not self._los(ghost_pos, pac_pos, ms):
-            return False
-        # Check landing cell behind Ghost
-        if dr == 0:
-            step_c = 1 if dc > 0 else -1
-            behind = (ghost_pos[0], ghost_pos[1] + step_c)
-        else:
-            step_r = 1 if dr > 0 else -1
-            behind = (ghost_pos[0] + step_r, ghost_pos[1])
-        h, w = ms.shape
-        return (0 <= behind[0] < h and 0 <= behind[1] < w
-                and ms[behind[0], behind[1]] != 1)
-
-    # ------------------------------------------------------------------
-    # VORONOI TERRITORY (accepts pre-computed gbfs)
-    # ------------------------------------------------------------------
-    def _voronoi_territory(self, g_pos, p_pos, pbfs, ms, gbfs=None):
-        """Ghost territory = cells Ghost reaches before Pacman (speed-aware)."""
-        if p_pos is None:
-            return 200, 0
-        if gbfs is None:
-            gbfs = self._bfs(g_pos, ms)
-        territory = 0
-        exits = 0
-        h, w = ms.shape
-        for r in range(h):
-            for c in range(w):
-                if ms[r, c] == 1:
-                    continue
-                node = (r, c)
-                g_turns = gbfs.get(node, 999)
-                p_turns = pbfs.get(node, 999) / max(1, self.pacman_speed)
-                if g_turns < p_turns:
-                    territory += 1
-                    if g_turns > 5:
-                        exits += 1
-        return territory, exits
 
     def _desperate_escape(self, pos, moves, ms, pac):
         best_mv = moves[0][1] if moves else Move.STAY
@@ -939,12 +655,34 @@ class GhostAgent(BaseGhostAgent):
                 d_new = abs(nxt[0] - pac[0]) + abs(nxt[1] - pac[1])
                 away = d_new - d_cur
             score = reach * 15 + exits * 50 + away * 10
-            if pac and self._los(nxt, pac, ms):
-                score -= 500
+            if pac and self._los(nxt, pac, ms): score -= 500
             if score > best_reach:
                 best_reach = score
                 best_mv = mv
         return best_mv
+
+    def _voronoi_territory(self, g_pos, p_pos, pbfs, ms):
+        """Calculates area Ghost can reach strictly faster than Pacman (accounting for Speed-2)"""
+        if p_pos is None: return 200, 0
+        
+        gbfs = self._bfs(g_pos, ms)
+        territory = 0
+        exits = 0
+        h, w = ms.shape
+        
+        for r in range(h):
+            for c in range(w):
+                if ms[r, c] == 1: continue
+                node = (r, c)
+                
+                g_turns = gbfs.get(node, 999)
+                p_turns = pbfs.get(node, 999) / max(1, self.pacman_speed)
+                
+                if g_turns < p_turns:
+                    territory += 1
+                    if g_turns > 5: exits += 1
+                    
+        return territory, exits
 
     # ------------------------------------------------------------------
     # UTILITIES
@@ -959,8 +697,7 @@ class GhostAgent(BaseGhostAgent):
                 for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                     nx, ny = cur[0] + dx, cur[1] + dy
                     n = (nx, ny)
-                    if (0 <= nx < h and 0 <= ny < w
-                            and n not in visited and ms[nx, ny] != 1):
+                    if 0 <= nx < h and 0 <= ny < w and n not in visited and ms[nx, ny] != 1:
                         visited.add(n)
                         nxt_frontier.append(n)
             frontier = nxt_frontier
@@ -970,16 +707,14 @@ class GhostAgent(BaseGhostAgent):
         x, y = pos
         h, w = ms.shape
         out = []
-        for (dx, dy), mv in [((-1, 0), Move.UP), ((1, 0), Move.DOWN),
-                              ((0, -1), Move.LEFT), ((0, 1), Move.RIGHT)]:
+        for (dx, dy), mv in [((-1, 0), Move.UP), ((1, 0), Move.DOWN), ((0, -1), Move.LEFT), ((0, 1), Move.RIGHT)]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < h and 0 <= ny < w and ms[nx, ny] != 1:
                 out.append(((nx, ny), mv))
         return out
 
     def _bfs(self, start, ms):
-        if start is None:
-            return {}
+        if start is None: return {}
         dist = {start: 0}
         q = deque([start])
         h, w = ms.shape
@@ -989,28 +724,24 @@ class GhostAgent(BaseGhostAgent):
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nx, ny = p[0] + dx, p[1] + dy
                 n = (nx, ny)
-                if (0 <= nx < h and 0 <= ny < w
-                        and n not in dist and ms[nx, ny] != 1):
+                if 0 <= nx < h and 0 <= ny < w and n not in dist and ms[nx, ny] != 1:
                     dist[n] = d + 1
                     q.append(n)
         return dist
 
     def _los(self, a, b, ms):
-        if b is None:
-            return False
+        if b is None: return False
         ar, ac = a
         br, bc = b
         if ar == br:
             lo, hi = min(ac, bc), max(ac, bc)
             for c in range(lo, hi + 1):
-                if ms[ar, c] == 1:
-                    return False
+                if ms[ar, c] == 1: return False
             return True
         if ac == bc:
             lo, hi = min(ar, br), max(ar, br)
             for r in range(lo, hi + 1):
-                if ms[r, ac] == 1:
-                    return False
+                if ms[r, ac] == 1: return False
             return True
         return False
 
@@ -1021,8 +752,7 @@ class GhostAgent(BaseGhostAgent):
         for dx in range(-3, 4):
             for dy in range(-3, 4):
                 nx, ny = x + dx, y + dy
-                if 0 <= nx < h and 0 <= ny < w and ms[nx, ny] == -1:
-                    c += 1
+                if 0 <= nx < h and 0 <= ny < w and ms[nx, ny] == -1: c += 1
         return c
 
     def _wall_neighbors(self, pos, ms):
@@ -1031,11 +761,9 @@ class GhostAgent(BaseGhostAgent):
         c = 0
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
+                if dx == 0 and dy == 0: continue
                 nx, ny = x + dx, y + dy
-                if not (0 <= nx < h and 0 <= ny < w) or ms[nx, ny] == 1:
-                    c += 1
+                if not (0 <= nx < h and 0 <= ny < w) or ms[nx, ny] == 1: c += 1
         return c
 
     def _open_stretch(self, pos, ms):
@@ -1046,10 +774,8 @@ class GhostAgent(BaseGhostAgent):
             r, c = pos
             for _ in range(8):
                 r, c = r + dr, c + dc
-                if 0 <= r < h and 0 <= c < w and ms[r, c] != 1:
-                    count += 1
-                else:
-                    break
+                if 0 <= r < h and 0 <= c < w and ms[r, c] != 1: count += 1
+                else: break
             best = max(best, count)
         return best
 
@@ -1059,18 +785,19 @@ class GhostAgent(BaseGhostAgent):
         deg = {}
         self.intersections.clear()
         self.dead_ends.clear()
+
         for r in range(h):
             for c in range(w):
                 if ms[r, c] != 1:
                     d = sum(1 for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                            if 0 <= r + dx < h and 0 <= c + dy < w
-                            and ms[r + dx, c + dy] != 1)
+                            if 0 <= r + dx < h and 0 <= c + dy < w and ms[r + dx, c + dy] != 1)
                     deg[(r, c)] = d
-                    if d >= 3:
-                        self.intersections.add((r, c))
+                    if d >= 3: self.intersections.add((r, c))
+
         dead = {p: 1 for p, d in deg.items() if d <= 1}
         q = deque(dead.keys())
         self.dead_ends = dead.copy()
+
         while q:
             cur = q.popleft()
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
@@ -1079,3 +806,4 @@ class GhostAgent(BaseGhostAgent):
                 if deg.get(nxt, 0) == 2 and nxt not in self.dead_ends:
                     self.dead_ends[nxt] = self.dead_ends[cur] + 1
                     q.append(nxt)
+                    
