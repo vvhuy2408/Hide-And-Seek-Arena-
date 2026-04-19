@@ -84,6 +84,7 @@ class MemoryMap:
         self.fog_cache.clear()
             
     def get_safe_neighbors(self, pos, map_state):
+        """Neighbors that are confirmed empty (==0)."""
         x, y = pos
         rows, cols = map_state.shape
         neighbors = []
@@ -93,32 +94,39 @@ class MemoryMap:
         ]:
             nx, ny = x+dx, y+dy
             if 0 <= nx < rows and 0 <= ny < cols:
-                if map_state[nx][ny] == 0:   # chỉ đi vào ô đã biết là trống
+                if map_state[nx][ny] == 0:
                     neighbors.append(((nx, ny), move))
         return neighbors
-    
-    def get_exploration_target(self, my_pos, map_state):
-        """Priotitize areas have highest fog_density near frontier."""
+
+    def get_navigable_neighbors(self, pos, map_state):
+        """Neighbors that are NOT confirmed walls (allows fog cells)."""
+        x, y = pos
+        rows, cols = map_state.shape
+        neighbors = []
+        for (dx, dy), move in [
+            ((-1,0), Move.UP), ((1,0), Move.DOWN),
+            ((0,-1), Move.LEFT), ((0,1), Move.RIGHT)
+        ]:
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < rows and 0 <= ny < cols:
+                if map_state[nx][ny] != 1:  # 0 or -1
+                    neighbors.append(((nx, ny), move))
+        return neighbors
+
+    def get_exploration_target(self, my_pos, map_state, dist_map=None):
+        """Pick closest frontier by BFS distance, with fog-density tiebreak."""
         if not self.unknown_frontier:
             return my_pos
-            
-        best_target = None
-        max_score = -float('inf')
-        
-       # Limit check to a maximum of 10 frontier cells to save time
+
         candidates = list(self.unknown_frontier)
-        if len(candidates) > 10:
-            candidates = random.sample(candidates, 10)
-            
+        # Score = -BFS_distance + fog_density_bonus (closer + foggier = better)
+        scored = []
         for p in candidates:
-            dist = abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1])
-            # Score = Surroundings fog density / Distance
-            score = self.fog_density(p, 3, map_state) * 100 - dist
-            if score > max_score:
-                max_score = score
-                best_target = p
-                
-        return best_target or my_pos
+            bfs_d = dist_map.get(p, 9999) if dist_map else (abs(p[0]-my_pos[0])+abs(p[1]-my_pos[1]))
+            fog_bonus = self.fog_density(p, 3, map_state) * 30
+            scored.append((bfs_d - fog_bonus, p))
+        scored.sort(key=lambda x: x[0])
+        return scored[0][1] if scored else my_pos
     
     def estimate_enemy_pos(self, step_number, map_state):
         """Predict potential enemy locations using BFS with an expanding radius."""
@@ -175,73 +183,119 @@ class PacmanAgent(BasePacmanAgent):
         self.memory = MemoryMap()
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        self.name = "BFS + Memory Pacman + Predictive Pacman"
+        self.name = "Hunter v2 — Speed-BFS + Frontier Sweep"
         self.current_path = []
         self.prev_move = None
         self.visited = set()
         self.last_positions = []
-        self.dist_map = {}
+        self.dist_map = {}       # BFS distance (safe cells only)
+        self.nav_dist_map = {}   # BFS distance (fog-traversable)
+        self.speed_dist_map = {} # speed-aware BFS (game turns)
         self.last_dist_source = None
         self.last_map_hash = None
+        # Target commitment
+        self.committed_target = None
+        self.committed_steps = 0
+        self.was_visible = False
 
     def step(self, map_state, my_position, enemy_position, step_number):
         self.memory.update(map_state, my_position, enemy_position, step_number)
-        start_time = time.perf_counter()
+        t0 = time.perf_counter()
         self.visited.add(my_position)
 
         # ---- CACHE dist_map ----
         current_map_hash = hash(map_state.tobytes())
-
         if self.last_dist_source != my_position or self.last_map_hash != current_map_hash:
-            self.dist_map = self._compute_dist_map(my_position, map_state)
+            self.dist_map = self._compute_dist_map(my_position, map_state, fog_ok=False)
+            self.nav_dist_map = self._compute_dist_map(my_position, map_state, fog_ok=True)
+            self.speed_dist_map = self._compute_speed_dist_map(my_position, map_state)
             self.last_dist_source = my_position
             self.last_map_hash = current_map_hash
 
         # ---- LOOP DETECTION ----
         self.last_positions.append(my_position)
-        if len(self.last_positions) > 6:
+        if len(self.last_positions) > 8:
             self.last_positions.pop(0)
+        is_looping = len(set(self.last_positions)) <= 2 and len(self.last_positions) >= 6
 
-        is_looping = len(set(self.last_positions)) <= 2
+        # ---- Clear visited on loss-of-sight ----
+        visible = enemy_position is not None
+        if self.was_visible and not visible:
+            self.visited.clear()
+            self.visited.add(my_position)
+        self.was_visible = visible
 
-        # ---- TARGET ----
+        # ---- TARGET SELECTION ----
+        target = None
+        mode = "explore"
+
         if enemy_position is not None:
+            # Direct chase
             target = enemy_position
+            mode = "chase"
+            self.committed_target = None
+            self.committed_steps = 0
 
-        # ---- PREDICT ----
         elif self.memory.last_seen_enemy is not None:
-            # BFS-based prediction from MemoryMap (uses map_state for wall-aware expansion)
+            # Predictive intercept
             ghost_start = self.memory.last_seen_enemy
+            steps_since = step_number - self.memory.step_last_seen
 
-            ghost_path = self._predict_ghost_path(ghost_start, map_state, steps=4)
-
-            intercept_points = []
-
-            for t, pos in enumerate(ghost_path, start=1):
-                pacman_dist = self.dist_map.get(pos, float('inf'))
-                # intercept condition
-                if pacman_dist <= t * self.pacman_speed:
-                    score = pacman_dist - t  # càng nhỏ càng tốt
-                    intercept_points.append((pos, score))
-
-            if intercept_points:
-                # chọn điểm chặn tốt nhất
-                target = min(intercept_points, key=lambda x: x[1])[0]
+            if steps_since <= 12:
+                ghost_path = self._predict_ghost_path(ghost_start, map_state, steps=min(6, steps_since + 3))
+                intercept_points = []
+                for t, pos in enumerate(ghost_path, start=1):
+                    pac_turns = self.speed_dist_map.get(pos, 9999)
+                    if pac_turns <= t:
+                        score = pac_turns - t
+                        intercept_points.append((pos, score))
+                if intercept_points:
+                    target = min(intercept_points, key=lambda x: x[1])[0]
+                    mode = "intercept"
+                else:
+                    target = ghost_path[-1]
+                    mode = "predict"
             else:
-                # fallback: chặn điểm cuối
-                target = ghost_path[-1]
+                # Too stale — go to last known, then explore
+                target = self.memory.last_seen_enemy
+                mode = "stale"
+                if my_position == target or self.dist_map.get(target, 9999) <= 1:
+                    self.memory.last_seen_enemy = None
+                    target = None
 
-        else:
-            target = self.memory.get_exploration_target(my_position, map_state)
+        if target is None:
+            # Committed exploration target
+            if self.committed_target is not None and self.committed_steps < 15:
+                if my_position == self.committed_target:
+                    self.committed_target = None
+                    self.committed_steps = 0
+                elif self.committed_target in self.memory.known_empty and \
+                     self.committed_target not in self.memory.unknown_frontier:
+                    # Frontier was already explored
+                    self.committed_target = None
+                    self.committed_steps = 0
+
+            if self.committed_target is None or self.committed_steps >= 15 or is_looping:
+                self.committed_target = self.memory.get_exploration_target(
+                    my_position, map_state, self.nav_dist_map
+                )
+                self.committed_steps = 0
+
+            target = self.committed_target
+            self.committed_steps += 1
+            mode = "explore"
+
+        if target is None:
+            target = my_position
 
         # ---- REPLAN ----
-        if not self.current_path or is_looping:
-            path = self._bfs(my_position, target, map_state)
-
+        if not self.current_path or is_looping or mode == "chase":
+            path = self._bfs_nav(my_position, target, map_state)
+            if not path:
+                path = self._bfs(my_position, target, map_state)
             if not path:
                 frontier_target = self._bfs_to_frontier(my_position, map_state)
                 path = self._bfs(my_position, frontier_target, map_state)
-
             self.current_path = path
 
         # ---- FALLBACK ----
@@ -249,40 +303,37 @@ class PacmanAgent(BasePacmanAgent):
             return self._explore(my_position, map_state, True)
 
         move = self.current_path.pop(0)
-
         steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
         if steps == 0:
+            self.current_path = []
             return self._explore(my_position, map_state, True)
 
-        # multi step
-        if self.current_path and self.current_path[0] == move:
+        # ---- MULTI-STEP (speed chaining) ----
+        if self.current_path and self.current_path[0] == move and self.pacman_speed >= 2:
             next_pos = self._apply_move(my_position, move)
             next2 = self._apply_move(next_pos, move)
-
-            # bước 1 phải hợp lệ
-            if not self._is_valid_position(next_pos, map_state):
-                steps = 1
+            if self._is_valid_position(next_pos, map_state) and self._is_valid_position(next2, map_state):
+                steps = min(2, self.pacman_speed)
+                self.current_path.pop(0)
             else:
-                # bước 2 phải nằm trong known_empty (an toàn tuyệt đối)
-                if next2 in self.memory.known_empty:
-                    steps = min(2, self.pacman_speed)
-                    self.current_path.pop(0)
-                else:
-                    steps = 1
+                steps = 1
 
         self.prev_move = move
-        print(f"[Pacman] Step {step_number} | target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - start_time:.4f}s")
+        print(f"[Pacman] Step {step_number} | mode={mode} target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - t0:.4f}s")
         return (move, max(1, steps))
-    
-    def _predict_ghost_move(self, ghost_pos, map_state):
-        neighbors = []
 
+    # ------------------------------------------------------------------
+    # PREDICTION
+    # ------------------------------------------------------------------
+    def _predict_ghost_move(self, ghost_pos, map_state, prev_pos=None):
+        """Predict next Ghost position using heuristic model."""
+        neighbors = []
         for (dx, dy), move in [
             ((-1,0), Move.UP), ((1,0), Move.DOWN),
             ((0,-1), Move.LEFT), ((0,1), Move.RIGHT)
         ]:
             nx, ny = ghost_pos[0] + dx, ghost_pos[1] + dy
-            if self._is_valid_position((nx, ny), map_state):
+            if self._is_navigable(nx, ny, map_state):
                 neighbors.append(((nx, ny), move))
 
         if not neighbors:
@@ -290,117 +341,128 @@ class PacmanAgent(BasePacmanAgent):
 
         best_score = -float('inf')
         best_pos = ghost_pos
-
         for pos, _ in neighbors:
-            dist = self.dist_map.get(pos, 9999)
+            dist = self.dist_map.get(pos, 50)
             fog = self.memory.fog_density(pos, 2, map_state)
-            deg = len(self.memory.get_safe_neighbors(pos, map_state))
-
-            score = dist * 10 + fog * 50 + deg * 5
-
+            deg = len(neighbors)  # lightweight
+            # Anti-backtrack: Ghost unlikely to return to previous position
+            backtrack = -20 if prev_pos and pos == prev_pos else 0
+            score = dist * 12 + fog * 40 + deg * 5 + backtrack
             if score > best_score:
                 best_score = score
                 best_pos = pos
-
         return best_pos
-    
-    def _predict_ghost_path(self, start_pos, map_state, steps=4):
-        """Rollout ghost policy nhiều bước."""
+
+    def _predict_ghost_path(self, start_pos, map_state, steps=6):
+        """Rollout ghost evasion policy with anti-backtrack."""
         path = []
         current = start_pos
-
+        prev = None
         for _ in range(steps):
-            nxt = self._predict_ghost_move(current, map_state)
+            nxt = self._predict_ghost_move(current, map_state, prev)
             path.append(nxt)
+            prev = current
             current = nxt
-
         return path
-    
-    def _compute_dist_map(self, start, map_state):
+
+    # ------------------------------------------------------------------
+    # BFS VARIANTS
+    # ------------------------------------------------------------------
+    def _compute_dist_map(self, start, map_state, fog_ok=False):
+        """BFS from start. fog_ok=True allows traversal through fog cells."""
         dist = {start: 0}
         queue = deque([start])
-
+        get_nb = self.memory.get_navigable_neighbors if fog_ok else self.memory.get_safe_neighbors
         while queue:
             current = queue.popleft()
             d = dist[current]
-
-            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
+            for next_pos, _ in get_nb(current, map_state):
                 if next_pos not in dist:
                     dist[next_pos] = d + 1
                     queue.append(next_pos)
-
         return dist
-    
-    # BFS distance (dùng cho predictive)
-    def _bfs_dist(self, start, goal, map_state):
-        if start == goal:
-            return 0
 
-        queue = deque([(start, 0)])
-        visited = {start}
-
+    def _compute_speed_dist_map(self, start, map_state):
+        """Speed-aware BFS: each step covers 1..speed cells straight.
+        Returns {pos: min_game_turns}."""
+        dist = {start: 0}
+        queue = deque([start])
         while queue:
-            current, dist = queue.popleft()
+            p = queue.popleft()
+            d = dist[p]
+            for mv in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+                dr, dc = mv.value
+                for n in range(1, self.pacman_speed + 1):
+                    nxt = (p[0] + dr * n, p[1] + dc * n)
+                    r, c = nxt
+                    h, w = map_state.shape
+                    if not (0 <= r < h and 0 <= c < w and map_state[r, c] != 1):
+                        break
+                    if nxt not in dist:
+                        dist[nxt] = d + 1
+                        queue.append(nxt)
+        return dist
 
-            for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
-                if next_pos not in visited:
-                    if next_pos == goal:
-                        return dist + 1
-                    visited.add(next_pos)
-                    queue.append((next_pos, dist + 1))
-
-        return float('inf')
-    
     def _bfs(self, start, goal, map_state):
+        """BFS on safe cells only."""
         if start == goal:
             return []
-        
         queue = deque([start])
         visited = {start}
         parent = {}
-
         while queue:
             current = queue.popleft()
             neighbors = self.memory.get_safe_neighbors(current, map_state)
-
-            # tie-break: ưu tiên đi thẳng
             if current in parent:
                 _, prev_move = parent[current]
                 neighbors.sort(key=lambda x: x[1] != prev_move)
-
             for next_pos, move in neighbors:
                 if next_pos not in visited:
                     visited.add(next_pos)
                     parent[next_pos] = (current, move)
-
                     if next_pos == goal:
                         return self._reconstruct_path(parent, start, goal)
-
                     queue.append(next_pos)
+        return []
 
+    def _bfs_nav(self, start, goal, map_state):
+        """BFS allowing fog traversal (navigable neighbors)."""
+        if start == goal:
+            return []
+        queue = deque([start])
+        visited = {start}
+        parent = {}
+        while queue:
+            current = queue.popleft()
+            neighbors = self.memory.get_navigable_neighbors(current, map_state)
+            if current in parent:
+                _, prev_move = parent[current]
+                neighbors.sort(key=lambda x: x[1] != prev_move)
+            for next_pos, move in neighbors:
+                if next_pos not in visited:
+                    visited.add(next_pos)
+                    parent[next_pos] = (current, move)
+                    if next_pos == goal:
+                        return self._reconstruct_path(parent, start, goal)
+                    queue.append(next_pos)
         return []
 
     def _bfs_to_frontier(self, start, map_state):
         queue = deque([start])
         visited = {start}
-
         while queue:
             current = queue.popleft()
-
-            # nếu gần unknown → target ngon
             if current in self.memory.known_empty:
                 for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
                     nx, ny = current[0]+dx, current[1]+dy
                     if (nx, ny) in self.memory.unknown_frontier:
                         return current
-
             for next_pos, _ in self.memory.get_safe_neighbors(current, map_state):
                 if next_pos not in visited:
                     visited.add(next_pos)
                     queue.append(next_pos)
+        return start
 
-        return start  # fallback
-    
     def _reconstruct_path(self, parent, start, goal):
         path = []
         cur = goal
@@ -411,49 +473,41 @@ class PacmanAgent(BasePacmanAgent):
         return path[::-1]
 
     def _explore(self, my_position, map_state, force_random=False):
-
         neighbors = self.memory.get_safe_neighbors(my_position, map_state)
-
+        if not neighbors:
+            # Try navigable (fog) neighbors
+            neighbors = self.memory.get_navigable_neighbors(my_position, map_state)
         if not neighbors:
             return (Move.STAY, 1)
-
-        import random
 
         if force_random:
             move = random.choice(neighbors)[1]
             steps = self._max_valid_steps(my_position, move, map_state, self.pacman_speed)
             return (move, max(1, steps))
 
+        opposite = {
+            Move.UP: Move.DOWN, Move.DOWN: Move.UP,
+            Move.LEFT: Move.RIGHT, Move.RIGHT: Move.LEFT
+        }
         best_move = Move.STAY
         best_score = -float('inf')
-
-        opposite = {
-            Move.UP: Move.DOWN,
-            Move.DOWN: Move.UP,
-            Move.LEFT: Move.RIGHT,
-            Move.RIGHT: Move.LEFT
-        }
-
         for next_pos, move in neighbors:
-
-            reverse_penalty = -15 if self.prev_move and move == opposite[self.prev_move] else 0
+            reverse_penalty = -15 if self.prev_move and move == opposite.get(self.prev_move) else 0
             visited_penalty = -5 if next_pos in self.visited else 3
-
-            # 🔥 gần frontier thì ưu tiên mạnh
-            frontier_bonus = 5 if next_pos in self.memory.unknown_frontier else 0
-
-            score = frontier_bonus + visited_penalty + reverse_penalty
-
+            frontier_bonus = 8 if next_pos in self.memory.unknown_frontier else 0
+            fog_bonus = 3 if map_state[next_pos[0], next_pos[1]] == -1 else 0
+            score = frontier_bonus + visited_penalty + reverse_penalty + fog_bonus
             if score > best_score:
                 best_score = score
                 best_move = move
 
         steps = self._max_valid_steps(my_position, best_move, map_state, self.pacman_speed)
         self.prev_move = best_move
-
         return (best_move, max(1, steps))
-    
-    # Helper methods
+
+    # ------------------------------------------------------------------
+    # HELPERS
+    # ------------------------------------------------------------------
     def _apply_move(self, pos, move):
         dr, dc = move.value
         return (pos[0] + dr, pos[1] + dc)
@@ -463,11 +517,14 @@ class PacmanAgent(BasePacmanAgent):
         h, w = map_state.shape
         return 0 <= r < h and 0 <= c < w and map_state[r, c] == 0
 
+    def _is_navigable(self, r, c, map_state):
+        h, w = map_state.shape
+        return 0 <= r < h and 0 <= c < w and map_state[r, c] != 1
+
     def _max_valid_steps(self, pos, move, map_state, desired_steps):
         steps = 0
         max_steps = min(self.pacman_speed, max(1, desired_steps))
         current = pos
-
         for _ in range(max_steps):
             dr, dc = move.value
             next_pos = (current[0] + dr, current[1] + dc)
