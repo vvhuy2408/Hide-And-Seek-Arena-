@@ -319,7 +319,7 @@ class PacmanAgent(BasePacmanAgent):
                 steps = 1
 
         self.prev_move = move
-        print(f"[Pacman] Step {step_number} | mode={mode} target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - t0:.4f}s")
+        # print(f"[Pacman] Step {step_number} | mode={mode} target={target} | move={move.name} steps={steps} | Time: {time.perf_counter() - t0:.4f}s")
         return (move, max(1, steps))
 
     # ------------------------------------------------------------------
@@ -588,11 +588,11 @@ class GhostAgent(BaseGhostAgent):
 
         moves = self._legal(my_position, map_state)
         if not moves:
-            print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move=STAY  | Time: {time.perf_counter() - t0:.4f}s")
+            # print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move=STAY  | Time: {time.perf_counter() - t0:.4f}s")
             return Move.STAY
         if len(moves) == 1:
             best_mv = moves[0][1]
-            print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
+            # print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
             return best_mv
 
         # OPENING BOOK: escape ghost house area (rows 7-12 are dangerous corridors)
@@ -601,7 +601,7 @@ class GhostAgent(BaseGhostAgent):
         if pac_ref is not None and (step_number <= 5 or (in_ghost_house and step_number <= 12)):
             best_opening = self._opening_escape(my_position, map_state, moves, pac_ref)
             if best_opening is not None:
-                print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move={best_opening.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
+                # print(f"[Ghost ] Step {step_number:3d} | threat={enemy_position or self.last_seen_pac} | move={best_opening.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
                 return best_opening
 
         # Determine threat position
@@ -624,7 +624,7 @@ class GhostAgent(BaseGhostAgent):
         # EMERGENCY MODE: when very close, use fast max-distance logic
         if threat and my_dist <= 3:
             best_mv = self._emergency_escape(my_position, moves, map_state, threat, pac_bfs)
-            print(f"[Ghost ] Step {step_number:3d} | threat={threat} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
+            # print(f"[Ghost ] Step {step_number:3d} | threat={threat} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
             return best_mv
 
         scores = []
@@ -649,7 +649,7 @@ class GhostAgent(BaseGhostAgent):
         if best_sc <= -999000:
             best_mv = self._desperate_escape(my_position, moves, map_state, threat)
 
-        print(f"[Ghost ] Step {step_number:3d} | threat={threat} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
+        # print(f"[Ghost ] Step {step_number:3d} | threat={threat} | move={best_mv.name:5s} | Time: {time.perf_counter() - t0:.4f}s")
         return best_mv
 
     def _emergency_escape(self, my_pos, moves, ms, pac, pac_bfs):
